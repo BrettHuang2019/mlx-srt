@@ -1,0 +1,4 @@
+whisper:
+  model_path: "mlx-community/whisper-large-v3-turbo"
+  initial_prompt: null
+
