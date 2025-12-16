@@ -1,353 +1,184 @@
-"""
-Segment Refinement Module
 
-This module refines raw transcription segments from Whisper to improve
-readability and natural flow. It merges over-segmented fragments,
-respects punctuation boundaries, and optimizes segment timing.
-"""
 
-from typing import List
+"""Segment refiner for improving Whisper transcription output."""
+
 import re
-import logging
+from typing import Dict, Any, List, Tuple
 
-from src.models import Segment
-from src.config import get_transcription_settings
 
-
-class SegmentRefiner:
-    """Refines raw transcription segments for better readability"""
-
-    def __init__(self):
-        """Initialize segment refiner with settings"""
-        self.settings = get_transcription_settings()["segment_refinement"]
-        self.logger = logging.getLogger(__name__)
-        self.punctuation_pattern = re.compile(
-            r'[.!?;:]'
-        )
-        self.whitespace_pattern = re.compile(r'\s+')
-
-    def refine_segments(self, segments: List[Segment]) -> List[Segment]:
-        """
-        Refine a list of raw transcription segments
-
-        Args:
-            segments: List of raw segments from Whisper
-
-        Returns:
-            List[Segment]: Refined segments with improved grouping
-        """
-        if not segments:
-            return []
-
-        # Sort segments by start time to ensure proper order
-        sorted_segments = sorted(segments, key=lambda s: s.start_time)
-
-        # Apply refinement rules
-        refined_segments = self._merge_fragments(sorted_segments)
-        refined_segments = self._respect_punctuation_boundaries(refined_segments)
-        refined_segments = self._split_long_segments(refined_segments)
-        refined_segments = self._clean_text(refined_segments)
-
-        return refined_segments
-
-    def _merge_fragments(self, segments: List[Segment]) -> List[Segment]:
-        """
-        Merge over-segmented fragments that should be together
-
-        Args:
-            segments: List of segments to process
-
-        Returns:
-            List[Segment]: Segments with fragments merged
-        """
-        if not segments:
-            return []
-
-        merged = []
-        current_segment = segments[0]
-
-        for next_segment in segments[1:]:
-            # Check if segments should be merged
-            if self._should_merge(current_segment, next_segment):
-                # Merge segments
-                current_segment = self._merge_two_segments(current_segment, next_segment)
-            else:
-                # Don't merge - add current and start new
-                merged.append(current_segment)
-                current_segment = next_segment
-
-        # Add the last segment
-        merged.append(current_segment)
-
-        return merged
-
-    def _should_merge(self, seg1: Segment, seg2: Segment) -> bool:
-        """
-        Determine if two segments should be merged
-
-        Args:
-            seg1: First segment
-            seg2: Second segment
-
-        Returns:
-            bool: True if segments should be merged
-        """
-        # Don't merge if either segment ends with sentence-ending punctuation
-        if self.punctuation_pattern.search(seg1.text.rstrip()[-1:]):
-            return False
-
-        # Don't merge if gap is too large
-        gap = seg2.start_time - seg1.end_time
-        if gap > self.settings["merge_gap_s"]:
-            return False
-
-        # Don't merge if first segment is already substantial
-        if seg1.duration > self.settings["max_segment_length_s"]:
-            return False
-
-        # Don't merge if first segment has enough words
-        word_count = len(seg1.text.split())
-        if word_count >= self.settings["min_words"] * 3:
-            return False
-
-        # Merge if gap is small and second fragment is short
-        if (gap <= self.settings["merge_gap_s"] and
-            len(seg2.text.split()) <= self.settings["min_words"] * 2):
-            return True
-
-        return False
-
-    def _merge_two_segments(self, seg1: Segment, seg2: Segment) -> Segment:
-        """
-        Merge two segments into one
-
-        Args:
-            seg1: First segment
-            seg2: Second segment
-
-        Returns:
-            Segment: Merged segment
-        """
-        # Combine text with appropriate spacing
-        if seg1.text.rstrip().endswith(('-', '–', '—')):
-            # Hyphenated word - continue without space
-            combined_text = seg1.text.rstrip() + seg2.text.lstrip()
-        else:
-            # Normal concatenation with space
-            combined_text = seg1.text.rstrip() + ' ' + seg2.text.lstrip()
-
-        # Use earliest start and latest end time
-        start_time = min(seg1.start_time, seg2.start_time)
-        end_time = max(seg1.end_time, seg2.end_time)
-
-        # Average confidence if both have it
-        confidence = None
-        if seg1.confidence is not None and seg2.confidence is not None:
-            # Weight by segment duration
-            total_duration = seg1.duration + seg2.duration
-            confidence = (seg1.confidence * seg1.duration + seg2.confidence * seg2.duration) / total_duration
-        elif seg1.confidence is not None:
-            confidence = seg1.confidence
-        elif seg2.confidence is not None:
-            confidence = seg2.confidence
-
-        # Preserve language if consistent
-        language = seg1.language if seg1.language == seg2.language else None
-
-        return Segment(
-            text=combined_text,
-            start_time=start_time,
-            end_time=end_time,
-            confidence=confidence,
-            language=language
-        )
-
-    def _respect_punctuation_boundaries(self, segments: List[Segment]) -> List[Segment]:
-        """
-        Ensure segments respect punctuation boundaries
-
-        Args:
-            segments: List of segments to process
-
-        Returns:
-            List[Segment]: Segments respecting punctuation boundaries
-        """
-        result = []
-        for segment in segments:
-            # Check if segment contains sentence-ending punctuation
-            if self.punctuation_pattern.search(segment.text):
-                # Split at punctuation boundaries if segment is too long
-                split_segments = self._split_at_punctuation(segment)
-                result.extend(split_segments)
-            else:
-                result.append(segment)
-
-        return result
-
-    def _split_at_punctuation(self, segment: Segment) -> List[Segment]:
-        """
-        Split a segment at punctuation boundaries
-
-        Args:
-            segment: Segment to split
-
-        Returns:
-            List[Segment]: Split segments
-        """
-        # Find sentence-ending punctuation positions
-        punctuation_positions = []
-        for match in self.punctuation_pattern.finditer(segment.text):
-            punctuation_positions.append(match.end())
-
-        if len(punctuation_positions) <= 1 or segment.duration <= self.settings["max_segment_length_s"]:
-            # No need to split
-            return [segment]
-
-        # Create new segments
-        segments = []
-        start_pos = 0
-        duration_per_char = segment.duration / len(segment.text)
-
-        for i, pos in enumerate(punctuation_positions[:-1]):  # Don't split at last punctuation
-            if i == len(punctuation_positions) - 1:
-                break  # Keep last part with final punctuation
-
-            text_part = segment.text[start_pos:pos].strip()
-            if not text_part:
-                continue
-
-            char_duration = duration_per_char * len(text_part)
-            start_time = segment.start_time + (start_pos * duration_per_char)
-            end_time = start_time + char_duration
-
-            segments.append(Segment(
-                text=text_part,
-                start_time=start_time,
-                end_time=end_time,
-                confidence=segment.confidence,
-                language=segment.language
-            ))
-
-            start_pos = pos
-
-        # Add final part
-        final_text = segment.text[start_pos:].strip()
-        if final_text:
-            start_time = segment.start_time + (start_pos * duration_per_char)
-            segments.append(Segment(
-                text=final_text,
-                start_time=start_time,
-                end_time=segment.end_time,
-                confidence=segment.confidence,
-                language=segment.language
-            ))
-
-        return segments
-
-    def _split_long_segments(self, segments: List[Segment]) -> List[Segment]:
-        """
-        Split segments that are too long
-
-        Args:
-            segments: List of segments to process
-
-        Returns:
-            List[Segment]: Segments with appropriate length
-        """
-        result = []
-        for segment in segments:
-            if segment.duration <= self.settings["max_segment_length_s"]:
-                result.append(segment)
-            else:
-                # Split long segment
-                split_segments = self._split_long_segment(segment)
-                result.extend(split_segments)
-
-        return result
-
-    def _split_long_segment(self, segment: Segment) -> List[Segment]:
-        """
-        Split a long segment into smaller parts
-
-        Args:
-            segment: Long segment to split
-
-        Returns:
-            List[Segment]: Split segments
-        """
-        # Simple splitting by time for now
-        # TODO: Implement more intelligent splitting based on content
-        target_duration = self.settings["max_segment_length_s"] * 0.8
-        num_parts = max(2, int(segment.duration / target_duration))
-
-        segments = []
-        part_duration = segment.duration / num_parts
-        words = segment.text.split()
-        words_per_part = len(words) // num_parts
-
-        for i in range(num_parts):
-            start_idx = i * words_per_part
-            end_idx = start_idx + words_per_part if i < num_parts - 1 else len(words)
-
-            part_words = words[start_idx:end_idx]
-            part_text = ' '.join(part_words)
-
-            start_time = segment.start_time + (i * part_duration)
-            end_time = start_time + part_duration if i < num_parts - 1 else segment.end_time
-
-            segments.append(Segment(
-                text=part_text,
-                start_time=start_time,
-                end_time=end_time,
-                confidence=segment.confidence,
-                language=segment.language
-            ))
-
-        return segments
-
-    def _clean_text(self, segments: List[Segment]) -> List[Segment]:
-        """
-        Clean up text in segments
-
-        Args:
-            segments: List of segments to clean
-
-        Returns:
-            List[Segment]: Cleaned segments
-        """
-        cleaned = []
-        for segment in segments:
-            # Normalize whitespace
-            cleaned_text = self.whitespace_pattern.sub(' ', segment.text.strip())
-
-            # Remove leading/trailing punctuation that doesn't belong
-            while cleaned_text and cleaned_text[0] in ',;:)]}':
-                cleaned_text = cleaned_text[1:].strip()
-
-            while cleaned_text and cleaned_text[-1] in '([{' and not cleaned_text.endswith('.!?'):
-                cleaned_text = cleaned_text[:-1].strip()
-
-            if cleaned_text:
-                cleaned.append(Segment(
-                    text=cleaned_text,
-                    start_time=segment.start_time,
-                    end_time=segment.end_time,
-                    confidence=segment.confidence,
-                    language=segment.language
-                ))
-
-        return cleaned
-
-
-def refine_segments(segments: List[Segment]) -> List[Segment]:
-    """
-    Convenience function to refine transcription segments
+def refine_segments(whisper_output: Dict[str, Any]) -> Dict[str, Any]:
+    """Refine Whisper transcription segments with improved spacing, merging, and splitting.
 
     Args:
-        segments: List of raw segments from Whisper
+        whisper_output: Full Whisper JSON output with 'text' and 'segments' fields
 
     Returns:
-        List[Segment]: Refined segments
+        Dict containing refined segments and processing statistics
     """
-    refiner = SegmentRefiner()
-    return refiner.refine_segments(segments)
+    # Initialize statistics
+    stats = {
+        "punctuation_fixed": 0,
+        "segments_merged": 0,
+        "segments_split": 0,
+        "empty_segments_removed": 0,
+        "total_input_segments": 0,
+        "total_output_segments": 0
+    }
+
+    # Extract segments
+    original_segments = whisper_output.get("segments", [])
+    stats["total_input_segments"] = len(original_segments)
+
+    # Step 1: Filter out empty segments
+    filtered_segments = [
+        segment for segment in original_segments
+        if segment.get("text", "").strip()
+    ]
+    stats["empty_segments_removed"] = len(original_segments) - len(filtered_segments)
+
+    # Step 2: Fix punctuation spacing
+    for segment in filtered_segments:
+        original_text = segment.get("text", "")
+        # Remove spaces before ! and ?
+        fixed_text = re.sub(r'\s+([!?])', r'\1', original_text)
+        if fixed_text != original_text:
+            segment["text"] = fixed_text
+            stats["punctuation_fixed"] += 1
+
+    # Step 3: Merge fragmented sentences
+    merged_segments, merge_count = _merge_fragments(filtered_segments)
+    stats["segments_merged"] = merge_count
+
+    # Step 4: Split long blocks
+    final_segments, split_count = _split_long_blocks(merged_segments)
+    stats["segments_split"] = split_count
+
+    stats["total_output_segments"] = len(final_segments)
+
+    # Recombine text from refined segments
+    combined_text = " ".join(segment["text"] for segment in final_segments)
+
+    return {
+        "text": combined_text,
+        "segments": final_segments,
+        "statistics": stats
+    }
+
+
+def _merge_fragments(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Merge consecutive segments where the first doesn't end with sentence-ending punctuation."""
+    if not segments:
+        return [], 0
+
+    merged = []
+    merge_count = 0
+    i = 0
+
+    while i < len(segments):
+        current = segments[i].copy()
+        original_text = current.get("text", "")
+
+        # Preserve leading spaces but work with stripped text for logic
+        has_leading_space = original_text.startswith(" ")
+        text = original_text.strip()
+
+        # Check if this segment ends with sentence-ending punctuation
+        if text and text[-1] not in ".!?":
+            # This is a fragment, merge with next segments until we find a complete sentence
+            j = i + 1
+            merged_text = text
+            end_time = current["end"]
+            has_merged = False
+
+            while j < len(segments):
+                next_segment = segments[j]
+                next_text = next_segment.get("text", "").strip()
+                if not next_text:
+                    j += 1
+                    continue
+
+                merged_text += " " + next_text
+                end_time = next_segment["end"]
+                has_merged = True
+
+                # If we found a complete sentence, stop merging
+                if next_text[-1] in ".!?":
+                    break
+                j += 1
+
+            # Only count as a merge if we actually merged with another segment
+            if has_merged:
+                merge_count += 1
+                # Update current segment with merged content
+                current["text"] = " " + merged_text if has_leading_space else merged_text
+                current["end"] = end_time
+                merged.append(current)
+                i = j + 1  # Skip the segments we merged
+            else:
+                # No merge occurred, just add the original
+                current["text"] = original_text
+                merged.append(current)
+                i += 1
+        else:
+            # This segment is already complete, just add it
+            current["text"] = original_text
+            merged.append(current)
+            i += 1
+
+    return merged, merge_count
+
+
+def _split_long_blocks(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Split segments containing multiple long sentences (>5 words each)."""
+    split_segments = []
+    split_count = 0
+
+    for segment in segments:
+        text = segment.get("text", "").strip()
+        sentences = re.split(r'([.!?])\s*', text)
+
+        # Reconstruct sentences with punctuation
+        reconstructed_sentences = []
+        for i in range(0, len(sentences) - 1, 2):
+            if i + 1 < len(sentences):
+                sentence = sentences[i] + sentences[i + 1]
+                if sentence.strip():
+                    reconstructed_sentences.append(sentence.strip())
+
+        # Check if we need to split (multiple long sentences)
+        if (len(reconstructed_sentences) > 1 and
+            all(len(sentence.split()) > 5 for sentence in reconstructed_sentences)):
+
+            # Split into multiple segments
+            total_duration = segment["end"] - segment["start"]
+            split_count += 1
+
+            for i, sentence in enumerate(reconstructed_sentences):
+                # Calculate proportional timing
+                sentence_words = len(sentence.split())
+                total_words = sum(len(s.split()) for s in reconstructed_sentences)
+
+                new_start = segment["start"] + (total_duration * i / len(reconstructed_sentences))
+                new_end = segment["start"] + (total_duration * (i + 1) / len(reconstructed_sentences))
+
+                split_segments.append({
+                    "id": segment["id"] + i * 0.1,  # Slight offset to maintain uniqueness
+                    "start": new_start,
+                    "end": new_end,
+                    "text": " " + sentence if i > 0 else sentence  # Add leading space for continuation
+                })
+        else:
+            split_segments.append(segment)
+
+    return split_segments, split_count
+
+
+def print_statistics(statistics: Dict[str, int]) -> None:
+    """Print refinement statistics in a formatted way."""
+    print("Segment Refinement Statistics:")
+    print(f"- Total input segments: {statistics['total_input_segments']}")
+    print(f"- Empty segments removed: {statistics['empty_segments_removed']}")
+    print(f"- Punctuation fixes: {statistics['punctuation_fixed']}")
+    print(f"- Segments merged: {statistics['segments_merged']}")
+    print(f"- Segments split: {statistics['segments_split']}")
+    print(f"- Total output segments: {statistics['total_output_segments']}")

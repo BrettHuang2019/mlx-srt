@@ -17,9 +17,11 @@ class TestWhisperTranscription:
         """Transcribe audio once and reuse result for all tests"""
         cls.result = transcribe_audio(cls.TEST_AUDIO)
 
-        # Save output for debugging
+        # Save output for debugging with same name as input audio
         os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
-        with open(os.path.join(cls.OUTPUT_DIR, 'transcription_result.json'), 'w', encoding='utf-8') as f:
+        input_name = os.path.splitext(os.path.basename(cls.TEST_AUDIO))[0]
+        output_filename = f"{input_name}.json"
+        with open(os.path.join(cls.OUTPUT_DIR, output_filename), 'w', encoding='utf-8') as f:
             json.dump(cls.result, f, indent=2, ensure_ascii=False)
 
     def test_transcribe_returns_text_and_segments(self):

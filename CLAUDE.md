@@ -9,3 +9,5 @@ Write **minimal, clean code** that follows these principles:
 - **No waste**: Remove unused imports, variables, and comments
 
 **Default to simple solutions. Optimize only when needed.**
+
+## Everytime you need to test, use the existing venv in the project.
