@@ -20,7 +20,8 @@ from translation.translate import (
     summarize,
     batch_translate,
     translate_transcript,
-    load_config
+    load_config,
+    translation_pipeline
 )
 
 # ==========================================
@@ -507,3 +508,206 @@ def test_regenerate_full_transcript_text_field():
 
     expected = "Bonjour Merci Au revoir"
     assert result == expected
+
+
+def test_translation_pipeline_with_whisper_output():
+    """
+    COMPREHENSIVE TRANSLATION PIPELINE TEST
+    Tests the complete pipeline from Whisper transcription to translated transcript.
+
+    This test:
+    1. Uses realistic Whisper transcription output as input
+    2. Processes through segment refinement
+    3. Generates summary
+    4. Translates segments using LLM
+    5. Merges translations back
+    6. Validates final output structure
+
+    Input: Whisper-like transcription with typical issues (fragments, spacing, etc.)
+    Expected: Complete translated transcript with zh fields in all segments
+    """
+    import time
+    import re
+    from datetime import datetime
+
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(__file__), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load test Whisper transcription from JSON file
+    input_file = os.path.join(os.path.dirname(__file__), 'input', 'test_refine_1.json')
+
+    # Load from file
+    with open(input_file, 'r', encoding='utf-8') as f:
+        whisper_transcript = json.load(f)
+
+    print(f"Testing translation pipeline with {len(whisper_transcript.get('segments', []))} segments...")
+
+    # Execute the complete pipeline
+    start_time = time.time()
+    result_transcript = translation_pipeline(whisper_transcript, output_dir)
+    end_time = time.time()
+
+    execution_time = end_time - start_time
+    print(f"Pipeline completed in {execution_time:.3f} seconds")
+
+    # === COMPREHENSIVE VALIDATION ===
+
+    # 1. Basic structure validation
+    assert isinstance(result_transcript, dict), "Result should be a dictionary"
+    assert "text" in result_transcript, "Result should have 'text' field"
+    assert "segments" in result_transcript, "Result should have 'segments' field"
+
+    result_segments = result_transcript["segments"]
+    assert len(result_segments) > 0, "Should have at least one segment"
+
+    # 2. Translation validation - all segments should have zh field
+    segments_with_zh = [seg for seg in result_segments if "zh" in seg and seg["zh"]]
+    assert len(segments_with_zh) == len(result_segments), \
+        f"All segments should have zh field. Got {len(segments_with_zh)}/{len(result_segments)}"
+
+    # 3. Chinese character validation
+    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+    for i, segment in enumerate(result_segments):
+        zh_text = segment.get("zh", "")
+        assert chinese_pattern.search(zh_text), \
+            f"Segment {i} translation '{zh_text}' should contain Chinese characters"
+
+    # 4. Use existing verification function
+    assert verify_translation_contains_chinese_characters(result_segments), \
+        "Chinese character verification failed"
+
+    # 5. Content validation - translations should differ from original
+    for i, segment in enumerate(result_segments):
+        fr_text = segment.get("text", "")
+        zh_text = segment.get("zh", "")
+        assert zh_text != fr_text, \
+            f"Segment {i} should be translated (zh != fr), but both are '{zh_text}'"
+
+    # 6. Pipeline artifacts validation - check expected files were created
+    expected_files = [
+        "00_whisper_original.json",  # Original input
+        "01_refined_transcript.json",  # After segment refinement
+        "PIPELINE_SUMMARY.txt"  # Pipeline summary
+    ]
+
+    for expected_file in expected_files:
+        file_path = os.path.join(output_dir, expected_file)
+        assert os.path.exists(file_path), f"Expected pipeline file {expected_file} should exist"
+
+    # 7. Segment refinement validation
+    refined_file = os.path.join(output_dir, "01_refined_transcript.json")
+    if os.path.exists(refined_file):
+        with open(refined_file, 'r', encoding='utf-8') as f:
+            refined_data = json.load(f)
+
+        # Refined transcript should have proper structure
+        assert "segments" in refined_data, "Refined transcript should have segments"
+        assert len(refined_data["segments"]) > 0, "Refined transcript should have segments"
+
+    print("✓ All pipeline validations passed!")
+
+    # === DETAILED REPORT GENERATION ===
+
+    pipeline_report_file = os.path.join(output_dir, 'translation_pipeline_test_report.txt')
+
+    with open(pipeline_report_file, 'w', encoding='utf-8') as f:
+        f.write("=== TRANSLATION PIPELINE TEST REPORT ===\n")
+        f.write("=" * 60 + "\n\n")
+
+        # Test metadata
+        f.write(f"Test Timestamp: {datetime.now().isoformat()}\n")
+        f.write(f"Pipeline Execution Time: {execution_time:.3f} seconds\n")
+        f.write(f"Test Status: PASSED\n\n")
+
+        # Input analysis
+        input_segments = whisper_transcript.get("segments", [])
+        f.write("=== INPUT ANALYSIS ===\n")
+        f.write(f"Original Whisper segments: {len(input_segments)}\n")
+        f.write(f"Original text length: {len(whisper_transcript.get('text', ''))} characters\n")
+        f.write(f"Original segment IDs: {[seg.get('id') for seg in input_segments]}\n\n")
+
+        # Output analysis
+        f.write("=== OUTPUT ANALYSIS ===\n")
+        f.write(f"Final segments: {len(result_segments)}\n")
+        f.write(f"Final text length: {len(result_transcript.get('text', ''))} characters\n")
+        f.write(f"Segments with zh translations: {len(segments_with_zh)}\n")
+
+        # Translation quality analysis
+        chinese_count = sum(1 for seg in result_segments if chinese_pattern.search(seg.get('zh', '')))
+        f.write(f"Segments with Chinese characters: {chinese_count}/{len(result_segments)}\n\n")
+
+        # Pipeline steps validation
+        f.write("=== PIPELINE STEPS VALIDATION ===\n")
+        f.write("✓ 1. Segment Refinement - Whisper output processed\n")
+        f.write("✓ 2. Summary Generation - Context created\n")
+        f.write("✓ 3. LLM Translation - Segments translated\n")
+        f.write("✓ 4. Merging - Translations integrated\n\n")
+
+        # Detailed segment comparison
+        f.write("=== DETAILED SEGMENT COMPARISON ===\n")
+        for i, segment in enumerate(result_segments[:10]):  # Show first 10
+            original_text = segment.get('text', '')
+            translated_text = segment.get('zh', '')
+            has_chinese = bool(chinese_pattern.search(translated_text))
+            is_different = translated_text != original_text
+
+            f.write(f"{i+1:2d}. ID {segment.get('id', 'N/A'):2d}:\n")
+            f.write(f"    FR: '{original_text}'\n")
+            f.write(f"    ZH: '{translated_text}'\n")
+            f.write(f"    Has Chinese: {'✓' if has_chinese else '✗'}\n")
+            f.write(f"    Different: {'✓' if is_different else '✗'}\n")
+            f.write("\n")
+
+        if len(result_segments) > 10:
+            f.write(f"... and {len(result_segments) - 10} more segments\n\n")
+
+        # File artifacts
+        f.write("=== PIPELINE ARTIFACTS ===\n")
+        f.write("Files created by pipeline:\n")
+        for expected_file in expected_files:
+            file_path = os.path.join(output_dir, expected_file)
+            exists = os.path.exists(file_path)
+            f.write(f"  {'✓' if exists else '✗'} {expected_file}\n")
+        f.write("\n")
+
+        # Performance metrics
+        f.write("=== PERFORMANCE METRICS ===\n")
+        if execution_time > 0:
+            f.write(f"Translation speed: {len(result_segments)/execution_time:.1f} segments/second\n")
+        f.write(f"Average time per segment: {execution_time/len(result_segments):.3f} seconds\n\n")
+
+        f.write("=" * 60 + "\n")
+        f.write("Report generated by: translation_pipeline_test\n")
+
+    print(f"Pipeline test report saved to: {pipeline_report_file}")
+
+    # Save pipeline test data as JSON
+    pipeline_data_file = os.path.join(output_dir, 'translation_pipeline_test_data.json')
+    test_data = {
+        "test_name": "translation_pipeline",
+        "timestamp": datetime.now().isoformat(),
+        "execution_time_seconds": execution_time,
+        "input_whisper_transcript": whisper_transcript,
+        "output_transcript": result_transcript,
+        "validation_results": {
+            "has_text_field": "text" in result_transcript,
+            "has_segments_field": "segments" in result_transcript,
+            "total_segments": len(result_segments),
+            "segments_with_zh": len(segments_with_zh),
+            "all_segments_have_zh": len(segments_with_zh) == len(result_segments),
+            "chinese_character_verification": verify_translation_contains_chinese_characters(result_segments),
+            "expected_files_created": all(os.path.exists(os.path.join(output_dir, f)) for f in expected_files)
+        }
+    }
+
+    with open(pipeline_data_file, 'w', encoding='utf-8') as f:
+        json.dump(test_data, f, ensure_ascii=False, indent=2)
+
+    print(f"Pipeline test data saved to: {pipeline_data_file}")
+
+    print(f"\n🎉 Translation pipeline test PASSED!")
+    print(f"   - Input: {len(input_segments)} Whisper segments")
+    print(f"   - Output: {len(result_segments)} translated segments")
+    print(f"   - Execution time: {execution_time:.3f} seconds")
+    print(f"   - All reports generated in {output_dir}")

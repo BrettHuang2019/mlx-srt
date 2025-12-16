@@ -15,6 +15,11 @@ except ImportError:
     load = None
     generate = None
 
+# Import segment refiner for preprocessing
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+from transcription.segment_refiner import refine_segments
+
 def convert_segments_to_translation_format(segments: List[Dict[str, Any]],
                                           output_dir: Optional[str] = None) -> List[Dict[str, Any]]:
     """
@@ -604,5 +609,135 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
 
     print(f"Process summary saved to: {process_summary_file}")
     print(f"\nTranslation complete! Check the output directory: {output_path}")
+
+    return final_transcript
+
+
+def translation_pipeline(whisper_transcript: Dict[str, Any],
+                        output_dir: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Complete pipeline from Whisper transcription to translated transcript.
+
+    This function orchestrates all steps:
+    1. Segment refinement using segment_refiner
+    2. Summary generation
+    3. Translation using LLM
+    4. Merging translations back
+
+    Args:
+        whisper_transcript: Raw Whisper transcription output with 'text' and 'segments' fields
+        output_dir: Directory to save intermediate and final files
+
+    Returns:
+        Translated transcript with zh fields added to segments
+    """
+    if output_dir is None:
+        output_dir = Path.cwd() / "translation_output"
+
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    print("=== TRANSLATION PIPELINE ===")
+    print(f"Input: Whisper transcription with {len(whisper_transcript.get('segments', []))} segments")
+
+    # Save original whisper output
+    original_file = output_path / "00_whisper_original.json"
+    with open(original_file, 'w', encoding='utf-8') as f:
+        json.dump(whisper_transcript, f, ensure_ascii=False, indent=2)
+    print(f"Original Whisper output saved to: {original_file}")
+
+    # Step 1: Refine segments using segment_refiner
+    print("\nStep 1: Refining Whisper segments...")
+    refined_result = refine_segments(whisper_transcript)
+
+    # Create refined transcript structure
+    refined_transcript = {
+        "text": refined_result["text"],
+        "segments": refined_result["segments"]
+    }
+
+    # Save refined transcript
+    refined_file = output_path / "01_refined_transcript.json"
+    with open(refined_file, 'w', encoding='utf-8') as f:
+        json.dump(refined_transcript, f, ensure_ascii=False, indent=2)
+    print(f"Refined transcript saved to: {refined_file}")
+
+    # Print refinement statistics
+    stats = refined_result["statistics"]
+    print(f"Refinement stats:")
+    print(f"  - Input segments: {stats['total_input_segments']}")
+    print(f"  - Output segments: {stats['total_output_segments']}")
+    print(f"  - Segments merged: {stats['segments_merged']}")
+    print(f"  - Segments split: {stats['segments_split']}")
+    print(f"  - Punctuation fixes: {stats['punctuation_fixed']}")
+
+    # Step 2: Generate summary
+    print("\nStep 2: Generating summary...")
+    summary = summarize(str(refined_file), output_dir)
+
+    # Step 3: Preprocess refined segments for translation
+    print("Step 3: Preprocessing refined segments for translation...")
+    segments = refined_transcript.get('segments', [])
+
+    # Filter out ellipsis and empty segments from refined segments
+    filtered_segments = filter_out_empty_and_ellipsis_segments(segments, output_dir)
+    ordered_segments = preserve_segment_order(filtered_segments, output_dir)
+    translation_segments = convert_segments_to_translation_format(ordered_segments, output_dir)
+
+    # Step 4: Translate segments
+    print("Step 4: Translating segments...")
+    translated_segments = batch_translate(translation_segments, summary, output_dir)
+
+    # Step 5: Merge translations back to refined segments
+    print("Step 5: Merging translations back to refined segments...")
+    final_segments = merge_translations_back_to_segments(ordered_segments, translated_segments)
+
+    # Create final transcript
+    final_transcript = refined_transcript.copy()
+    final_transcript['segments'] = final_segments
+    final_transcript['text'] = regenerate_full_transcript_text(final_segments)
+
+    # Save final transcript
+    final_file = output_path / "11_final_translated_transcript.json"
+    with open(final_file, 'w', encoding='utf-8') as f:
+        json.dump(final_transcript, f, ensure_ascii=False, indent=2)
+    print(f"Final translated transcript saved to: {final_file}")
+
+    print(f"\n=== PIPELINE COMPLETE ===")
+    print(f"Final transcript with {len(final_transcript.get('segments', []))} segments")
+
+    # Count segments with translations
+    segments_with_zh = len([s for s in final_segments if 'zh' in s and s['zh']])
+    print(f"Segments with translations: {segments_with_zh}/{len(final_segments)}")
+
+    # Create pipeline summary
+    pipeline_summary_file = output_path / "PIPELINE_SUMMARY.txt"
+    with open(pipeline_summary_file, 'w', encoding='utf-8') as f:
+        f.write("=== TRANSLATION PIPELINE SUMMARY ===\n\n")
+        f.write(f"Input: Whisper transcription\n")
+        f.write(f"Output: Translated transcript with Chinese translations\n\n")
+
+        f.write("Pipeline Steps:\n")
+        f.write("1. Segment Refinement (segment_refiner.py)\n")
+        f.write("   - Remove empty segments\n")
+        f.write("   - Fix punctuation spacing\n")
+        f.write("   - Merge fragmented sentences\n")
+        f.write("   - Split long blocks\n")
+        f.write("2. Summary Generation\n")
+        f.write("3. LLM Translation\n")
+        f.write("4. Merging Translations\n\n")
+
+        f.write("Refinement Statistics:\n")
+        for key, value in stats.items():
+            f.write(f"  - {key.replace('_', ' ').title()}: {value}\n")
+
+        f.write(f"\nFinal Output:\n")
+        f.write(f"  - Total refined segments: {len(final_segments)}\n")
+        f.write(f"  - Segments with translations: {segments_with_zh}\n")
+        f.write(f"  - Translation coverage: {segments_with_zh/len(final_segments)*100:.1f}%\n")
+        f.write(f"  - Final transcript file: 11_final_translated_transcript.json\n")
+
+    print(f"Pipeline summary saved to: {pipeline_summary_file}")
 
     return final_transcript
