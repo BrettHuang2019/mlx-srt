@@ -1,0 +1,19 @@
+{
+    "text": "Le pique-nique royal de Fée. Je crois que c'est le jour idéal pour faire notre pique-nique royal de Fée.",
+    "segments": [
+        {
+            "id": 1,
+            "start": 5.627,
+            "end": 8.827,
+            "text": "Le pique-nique royal de Fée.",
+            "zh": "仙女们的皇家野餐。"
+        },
+        {
+            "id": 2,
+            "start": 11.327,
+            "end": 14.407,
+            "text": "Je crois que c'est le jour idéal pour faire notre pique-nique royal de Fée.",
+            "zh": "我想今天是举行我们仙女皇家野餐的理想日子。"
+        }
+    ]
+}
