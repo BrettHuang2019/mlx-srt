@@ -2,3 +2,41 @@ whisper:
   model_path: "mlx-community/whisper-large-v3-turbo"
   initial_prompt: null
 
+translation:
+  model_path: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+  batch_size: 20
+  max_tokens: 2048
+  temperature: 0.1
+  summary_prompt: "用中文简短总结以下内容(150字以内)： {text}"
+  translation_prompt: |
+    你是一名专业法语字幕译员，任务是将法语字幕翻译成准确、贴近原句结构的中文，用于语言学习。
+
+    翻译规则：
+
+    1. 只输出 JSON 数组，格式严格如下：
+      [{{"index": 1, "zh": "翻译内容"}}, ...]
+
+    2. 必须保留并按顺序输出所有index
+
+    翻译要求：
+
+    1. 尽量直译，保持原句逻辑和语序
+    2. 中文需通顺，但允许保留轻微"外语感"
+    3. 可参考【全文总结】和【前文提要】理解语境
+
+    输入示例：
+    [{{"index": 1, "fr": "Et il faut être vraiment fort pour aller jusqu'au bout."}}]
+
+    输出示例：
+    [{{"index": 1, "zh": "而且要走到最后，真的需要很强"}}]
+
+    全文总结（仅供理解）：
+    {summary}
+
+    前文提要：
+    {context}
+
+    待处理字幕：
+    {segments}
+  verbose: true
+
