@@ -134,11 +134,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process audio file
+  # Process audio file (SRT saved alongside input, artifacts cleaned up)
   python src/main.py audio.mp3
 
   # Process video file with custom output directory
   python src/main.py video.mp4 --output /path/to/output
+
+  # Process and keep intermediate artifacts for debugging
+  python src/main.py video.mp4 --keep-artifacts
 
   # Process with SRT output in specific location
   python src/main.py audio.mp3 --srt-output /path/to/subtitles.srt
@@ -158,7 +161,7 @@ Examples:
 
     parser.add_argument(
         "--srt-output", "-s",
-        help="SRT output file path (default: output_dir/input_filename.srt)",
+        help="SRT output file path (default: same directory as input file)",
         default=None
     )
 
@@ -166,6 +169,12 @@ Examples:
         "--no-srt",
         action="store_true",
         help="Skip SRT generation, only process transcription and translation"
+    )
+
+    parser.add_argument(
+        "--keep-artifacts",
+        action="store_true",
+        help="Keep the output folder with intermediate artifacts (default: clean up on success)"
     )
 
     args = parser.parse_args()
@@ -202,17 +211,18 @@ Examples:
             print(f"Supported video formats: {', '.join(sorted(video_extensions))}")
             sys.exit(1)
 
-        # Generate SRT if requested
+        # Generate SRT if requested - place at same folder level as input file
         if not args.no_srt:
             if args.srt_output:
                 srt_path = args.srt_output
             else:
-                srt_path = output_dir / f"{input_path.stem}.srt"
+                # Default to same folder as input file
+                srt_path = input_path.parent / f"{input_path.stem}.srt"
 
             generate_srt_file(translated_transcript, str(srt_path))
 
-        # Save final transcript with same name as input file in same folder
-        final_transcript_path = input_path.parent / f"{input_path.stem}_translated.json"
+        # Save final transcript JSON in output directory
+        final_transcript_path = output_dir / f"{input_path.stem}_translated.json"
         with open(final_transcript_path, 'w', encoding='utf-8') as f:
             json.dump(translated_transcript, f, ensure_ascii=False, indent=2)
 
@@ -233,6 +243,18 @@ Examples:
             print(f"  - Total segments: {len(segments)}")
             print(f"  - Segments with Chinese translation: {segments_with_zh}")
             print(f"  - Translation coverage: {segments_with_zh/len(segments)*100:.1f}%")
+
+        # Clean up output directory unless --keep-artifacts is specified
+        if not args.keep_artifacts and output_dir.exists():
+            try:
+                import shutil
+                shutil.rmtree(output_dir)
+                print(f"\n🧹 Cleaned up output directory: {output_dir}")
+            except Exception as cleanup_error:
+                print(f"\n⚠️  Warning: Could not clean up output directory: {cleanup_error}")
+        elif args.keep_artifacts:
+            print(f"\n📁 Kept artifacts in output directory: {output_dir}")
+            print(f"   Use --keep-artifacts option to preserve them for debugging")
 
     except Exception as e:
         print(f"Error: {e}")
