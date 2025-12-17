@@ -6,7 +6,9 @@ translation:
   model_path: "mlx-community/Qwen2.5-7B-Instruct-4bit"
   batch_size: 20
   max_tokens: 2048
-  temperature: 0.1
+  temperature: 0.5
+  max_retries: 3
+  retry_delay: 1.0
   summary_prompt: "用中文简短总结以下内容(150字以内)： {text}"
   translation_prompt: |
     你是一名专业法语字幕译员，任务是将法语字幕翻译成准确、贴近原句结构的中文，用于语言学习。
@@ -16,7 +18,9 @@ translation:
     1. 只输出 JSON 数组，格式严格如下：
       [{{"index": 1, "zh": "翻译内容"}}, ...]
 
-    2. 必须保留并按顺序输出所有index
+    2. 必须保留并按顺序输出所有index： 每一条输出的 index 必须原样复制自输入字幕； 注意: 输出条目与 原字幕 必须一一对应，禁止跳过、重复或错位；
+
+
 
     翻译要求：
 

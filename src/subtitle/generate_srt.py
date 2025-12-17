@@ -29,8 +29,8 @@ def generate_srt_from_segments(segments: List[Dict[str, Any]]) -> str:
         start_time = format_timestamp(segment["start"])
         end_time = format_timestamp(segment["end"])
 
-        original_text = segment.get("text", "")
-        translated_text = segment.get("zh", "")
+        original_text = segment.get("text", "").strip()
+        translated_text = segment.get("zh", "").strip()
 
         if translated_text:
             # Include both original and translated text

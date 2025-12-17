@@ -21,6 +21,7 @@ def refine_segments(whisper_output: Dict[str, Any]) -> Dict[str, Any]:
         "segments_merged": 0,
         "segments_split": 0,
         "empty_segments_removed": 0,
+        "repetitive_patterns_removed": 0,
         "total_input_segments": 0,
         "total_output_segments": 0
     }
@@ -45,11 +46,15 @@ def refine_segments(whisper_output: Dict[str, Any]) -> Dict[str, Any]:
             segment["text"] = fixed_text
             stats["punctuation_fixed"] += 1
 
-    # Step 3: Merge fragmented sentences
-    merged_segments, merge_count = _merge_fragments(filtered_segments)
+    # Step 3: Remove repetitive word patterns (LLM artifacts)
+    cleaned_segments, repetitive_removed = _remove_repetitive_patterns(filtered_segments)
+    stats["repetitive_patterns_removed"] = repetitive_removed
+
+    # Step 4: Merge fragmented sentences
+    merged_segments, merge_count = _merge_fragments(cleaned_segments)
     stats["segments_merged"] = merge_count
 
-    # Step 4: Split long blocks
+    # Step 5: Split long blocks
     final_segments, split_count = _split_long_blocks(merged_segments)
     stats["segments_split"] = split_count
 
@@ -173,12 +178,80 @@ def _split_long_blocks(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, A
     return split_segments, split_count
 
 
+def _remove_repetitive_patterns(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Remove LLM artifacts where same word repeats excessively (>5 times)."""
+    cleaned_segments = []
+    repetitive_removed = 0
+
+    for segment in segments:
+        text = segment.get("text", "")
+
+        # Check for repetitive word patterns
+        words = text.split()
+        cleaned_text = text
+        segment_modified = False
+
+        # Look for words that repeat more than 5 times consecutively or near-consecutively
+        if words:
+            i = 0
+            while i < len(words):
+                word = words[i].strip(" .!?,:;")
+                if not word:
+                    i += 1
+                    continue
+
+                # Count consecutive or near-consecutive repetitions of the same word
+                count = 1
+                j = i + 1
+
+                while j < len(words):
+                    next_word = words[j].strip(" .!?,:;")
+                    if next_word.lower() == word.lower():
+                        count += 1
+                        j += 1
+                    elif j < i + 3:  # Allow up to 2 different words between repetitions
+                        j += 1
+                    else:
+                        break
+
+                # If word repeats too many times, remove the entire repetitive sequence
+                if count > 5:
+                    print(f"Removing repetitive pattern: '{word}' repeated {count} times")
+                    # Remove the repetitive sequence
+                    start_idx = i
+                    end_idx = j
+                    words[start_idx:end_idx] = []
+                    segment_modified = True
+                    repetitive_removed += 1
+                    # Don't increment i since we removed words
+                else:
+                    i += 1
+
+        # Update segment text if modified
+        if segment_modified:
+            cleaned_text = " ".join(words)
+            # Clean up any double spaces
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+
+        # Only keep segment if it has meaningful content
+        if cleaned_text.strip():
+            segment_copy = segment.copy()
+            segment_copy["text"] = cleaned_text
+            cleaned_segments.append(segment_copy)
+        else:
+            # Segment became empty after cleaning, don't add it
+            repetitive_removed += 1
+
+    return cleaned_segments, repetitive_removed
+
+
 def print_statistics(statistics: Dict[str, int]) -> None:
     """Print refinement statistics in a formatted way."""
     print("Segment Refinement Statistics:")
     print(f"- Total input segments: {statistics['total_input_segments']}")
     print(f"- Empty segments removed: {statistics['empty_segments_removed']}")
     print(f"- Punctuation fixes: {statistics['punctuation_fixed']}")
+    print(f"- Repetitive patterns removed: {statistics['repetitive_patterns_removed']}")
     print(f"- Segments merged: {statistics['segments_merged']}")
     print(f"- Segments split: {statistics['segments_split']}")
     print(f"- Total output segments: {statistics['total_output_segments']}")

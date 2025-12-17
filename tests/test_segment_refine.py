@@ -3,6 +3,7 @@
 import pytest
 from typing import List, Dict, Any
 from src.transcription.segment_refiner import refine_segments
+from src.translation.translate import regenerate_sequential_ids
 
 class TestPunctuationSpacing:
     """Test punctuation spacing correction."""
@@ -281,3 +282,102 @@ class TestEdgeCases:
         # Last incomplete segment should remain as-is since there's no next segment to merge with
         assert len(result["segments"]) >= 1
         assert result["statistics"]["segments_merged"] == 0
+
+
+class TestSequentialIDRegeneration:
+    """Test ID regeneration after segment refinement to prevent index mismatch in translation."""
+
+    def test_regenerate_ids_after_merge_creates_continuous_sequence(self):
+        """When segments 68 and 69 are merged, regenerate IDs to create continuous sequence."""
+        # Simulate refined segments where 68 and 69 were merged into one segment
+        refined_segments = [
+            {"id": 67, "text": "Sentence 67.", "start": 67.0, "end": 68.0},
+            {"id": 68, "text": "Merged sentence from original 68 and 69.", "start": 68.0, "end": 70.0},  # This was 68+69 merged
+            {"id": 70, "text": "Sentence 70.", "start": 70.0, "end": 71.0},  # Note the gap: no id 69
+            {"id": 71, "text": "Sentence 71.", "start": 71.0, "end": 72.0}
+        ]
+
+        # Apply ID regeneration
+        regenerated = regenerate_sequential_ids(refined_segments)
+
+        # Verify continuous sequential IDs starting from 1
+        assert len(regenerated) == 4
+        assert regenerated[0]["id"] == 1
+        assert regenerated[1]["id"] == 2
+        assert regenerated[2]["id"] == 3
+        assert regenerated[3]["id"] == 4
+
+        # Verify text content is preserved
+        assert regenerated[0]["text"] == "Sentence 67."
+        assert regenerated[1]["text"] == "Merged sentence from original 68 and 69."
+        assert regenerated[2]["text"] == "Sentence 70."
+        assert regenerated[3]["text"] == "Sentence 71."
+
+        # Verify timing is preserved
+        assert regenerated[0]["start"] == 67.0
+        assert regenerated[0]["end"] == 68.0
+        assert regenerated[1]["start"] == 68.0
+        assert regenerated[1]["end"] == 70.0
+
+    def test_regenerate_ids_with_complex_merge_scenario(self):
+        """Test ID regeneration with multiple merge operations creating gaps."""
+        # Simulate a complex refinement scenario with multiple gaps
+        refined_segments = [
+            {"id": 1, "text": "First sentence.", "start": 0.0, "end": 2.0},
+            {"id": 3, "text": "Third sentence (2 was merged with 1).", "start": 2.0, "end": 4.0},
+            {"id": 5, "text": "Fifth sentence (4 was empty and removed).", "start": 4.0, "end": 6.0},
+            {"id": 8, "text": "Eighth sentence (6-7 were merged into this).", "start": 6.0, "end": 9.0},
+            {"id": 9, "text": "Ninth sentence.", "start": 9.0, "end": 10.0}
+        ]
+
+        regenerated = regenerate_sequential_ids(refined_segments)
+
+        # Verify continuous sequential IDs
+        assert len(regenerated) == 5
+        for i, segment in enumerate(regenerated, start=1):
+            assert segment["id"] == i
+
+        # Verify order and content are preserved
+        assert regenerated[1]["text"] == "Third sentence (2 was merged with 1)."
+        assert regenerated[2]["text"] == "Fifth sentence (4 was empty and removed)."
+        assert regenerated[3]["text"] == "Eighth sentence (6-7 were merged into this)."
+
+    def test_no_gaps_preserves_relative_ordering(self):
+        """When no gaps exist, IDs should still be regenerated starting from 1."""
+        segments_without_gaps = [
+            {"id": 10, "text": "First", "start": 0.0, "end": 1.0},
+            {"id": 11, "text": "Second", "start": 1.0, "end": 2.0},
+            {"id": 12, "text": "Third", "start": 2.0, "end": 3.0}
+        ]
+
+        regenerated = regenerate_sequential_ids(segments_without_gaps)
+
+        # Should still regenerate to start from 1
+        assert len(regenerated) == 3
+        assert regenerated[0]["id"] == 1
+        assert regenerated[1]["id"] == 2
+        assert regenerated[2]["id"] == 3
+
+        # Content and order preserved
+        assert regenerated[0]["text"] == "First"
+        assert regenerated[1]["text"] == "Second"
+        assert regenerated[2]["text"] == "Third"
+
+    def test_empty_list_handling(self):
+        """Empty segment list should return empty list."""
+        empty_segments = []
+        regenerated = regenerate_sequential_ids(empty_segments)
+
+        assert regenerated == []
+
+    def test_single_segment(self):
+        """Single segment should get ID 1."""
+        single_segment = [
+            {"id": 42, "text": "Only segment", "start": 0.0, "end": 5.0}
+        ]
+
+        regenerated = regenerate_sequential_ids(single_segment)
+
+        assert len(regenerated) == 1
+        assert regenerated[0]["id"] == 1
+        assert regenerated[0]["text"] == "Only segment"
