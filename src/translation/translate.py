@@ -118,19 +118,38 @@ def regenerate_sequential_ids(segments: List[Dict[str, Any]],
 
     return regenerated_segments
 
+def is_valid_translation(zh: str, original_fr: str = "") -> bool:
+    """
+    Validate translation: either contains Chinese characters or contains only numbers/punctuation.
+    Returns False if empty or identical to original French (except for numbers-only content).
+    """
+    if not zh or not zh.strip():
+        return False
+
+    zh = zh.strip()
+
+    # Check if contains Chinese characters
+    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+    if chinese_pattern.search(zh):
+        # For Chinese content, it should not be identical to French
+        return zh != original_fr
+
+    # Check if contains only numbers, decimals, commas, and spaces (statistical data)
+    numbers_pattern = re.compile(r'^[\d\s,.\-:;]+$')
+    if numbers_pattern.match(zh):
+        # For numbers-only content, allow it to be identical to French (statistical data)
+        return True
+
+    return False
+
 def verify_translation_contains_chinese_characters(translated_items: List[Dict[str, Any]]) -> bool:
     """
-    Verify that translations contain valid Chinese characters.
+    Verify that translations contain valid content (Chinese characters or numbers-only).
     """
-    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
-
     for item in translated_items:
         zh = item.get('zh', '').strip()
-        if not zh:
-            return False
-        if not chinese_pattern.search(zh):
-            return False
-        if zh == item.get('fr', ''):
+        fr = item.get('fr', '')
+        if not is_valid_translation(zh, fr):
             return False
     return True
 
@@ -214,7 +233,7 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
             # Generate summary
             summary_prompt = translation_config.get('summary_prompt',
                                                  '用150字左右总结以下文稿: {text}')
-            prompt = summary_prompt.format(text=full_text)
+            prompt = summary_prompt.replace("{text}", full_text)
 
             messages = [{"role": "user", "content": prompt}]
             formatted_prompt = tokenizer.apply_chat_template(
@@ -330,54 +349,118 @@ def validate_and_parse_batch_response(response: str, batch_segments: List[Dict[s
     # Error Type 6: Translation Quality Validation
     for i, translated_item in enumerate(batch_translated):
         zh = translated_item.get('zh', '').strip()
+        original_fr = batch_segments[i].get('fr', '')
+
         if not zh:
             raise ValueError(f"Batch {batch_num + 1} item {i} has empty translation")
 
-        # Check if translation contains Chinese characters
-        chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
-        if not chinese_pattern.search(zh):
-            raise ValueError(f"Batch {batch_num + 1} item {i} translation has no Chinese characters: '{zh}'")
+        # Use the updated validation logic that allows numbers-only translations
+        if not is_valid_translation(zh, original_fr):
+            # Determine the specific error type for better error messages
+            chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+            numbers_pattern = re.compile(r'^[\d\s,.\-:;]+$')
 
-        # Check if translation equals original French (no translation)
-        if zh == batch_segments[i].get('fr', ''):
-            raise ValueError(f"Batch {batch_num + 1} item {i} translation is identical to original French")
+            if chinese_pattern.search(zh):
+                raise ValueError(f"Batch {batch_num + 1} item {i} Chinese translation is identical to original French: '{zh}'")
+            elif numbers_pattern.match(zh):
+                # This shouldn't happen with our updated logic, but just in case
+                pass  # Numbers-only should always be valid
+            else:
+                raise ValueError(f"Batch {batch_num + 1} item {i} translation has invalid content: '{zh}'")
 
     return batch_translated
 
-def process_split_batch(split_segments: List[Dict[str, Any]], summary: str, context_text: str,
-                       model, tokenizer, translation_prompt: str, max_tokens: int,
-                       temperature: float, verbose: bool, max_retries: int,
-                       retry_delay: float, output_dir: Optional[str],
-                       split_id: str, original_batch_num: int, split_name: str) -> List[Dict[str, Any]]:
+def process_batch_recursive(segments: List[Dict[str, Any]], summary: str, context_text: str,
+                           model, tokenizer, translation_prompt: str, max_tokens: int,
+                           temperature: float, verbose: bool, max_retries: int,
+                           retry_delay: float, output_dir: Optional[str],
+                           batch_id: str, depth: int = 0) -> List[Dict[str, Any]]:
     """
-    Process a split batch with retry logic.
-    Each split batch gets 3 retry attempts.
+    Process a batch with recursive splitting strategy.
+    Keeps splitting until success or single sentences remain.
     """
-    print(f"    📦 Processing {split_name} ({len(split_segments)} segments)...")
+    indent = "  " * depth
+    print(f"{indent}📦 Processing batch ({len(segments)} segments)...")
 
-    # Update context for this split (use previous segments from this split)
-    split_context_segments = []
-    if len(split_segments) > 1:
-        split_context_segments = split_segments[:-1]
-    split_context_text = " ".join([seg['fr'] for seg in split_context_segments]) if split_context_segments else ""
+    # Base case: single sentence - if it fails, we cannot split further
+    if len(segments) == 1:
+        print(f"{indent}🔍 Single sentence batch - attempting with retries...")
+        return process_single_batch_with_retries(
+            segments, summary, context_text, model, tokenizer,
+            translation_prompt, max_tokens, temperature, verbose,
+            max_retries, retry_delay, output_dir, batch_id, depth, indent
+        )
 
-    # Convert split batch segments to JSON
-    segments_json = json.dumps(split_segments, ensure_ascii=False, indent=2)
-
-    # Create prompt for this split
+    # Try processing current batch first
     try:
-        prompt = translation_prompt.format(summary=summary, context=split_context_text, segments=segments_json)
-    except KeyError as e:
-        raise ValueError(f"Missing placeholder in translation prompt template: {e}")
-    except Exception as e:
-        raise ValueError(f"Error formatting translation prompt: {e}")
+        result = process_single_batch_with_retries(
+            segments, summary, context_text, model, tokenizer,
+            translation_prompt, max_tokens, temperature, verbose,
+            max_retries, retry_delay, output_dir, batch_id, depth, indent
+        )
+        print(f"{indent}✅ Batch completed successfully ({len(segments)} segments)")
+        return result
+    except RuntimeError as e:
+        print(f"{indent}⚠️  Batch failed after retries: {e}")
+        print(f"{indent}🔄 Splitting batch into smaller batches...")
+
+        # Split batch into two smaller batches
+        mid_point = len(segments) // 2
+        first_half = segments[:mid_point]
+        second_half = segments[mid_point:]
+
+        print(f"{indent}📂 Split into: {len(first_half)} + {len(second_half)} segments")
+
+        # Create sub-batch IDs
+        first_half_id = f"{batch_id}_a"
+        second_half_id = f"{batch_id}_b"
+
+        # Recursively process each half
+        print(f"{indent}Processing first half...")
+        first_result = process_batch_recursive(
+            first_half, summary, context_text, model, tokenizer,
+            translation_prompt, max_tokens, temperature, verbose,
+            max_retries, retry_delay, output_dir, first_half_id, depth + 1
+        )
+
+        print(f"{indent}Processing second half...")
+        second_result = process_batch_recursive(
+            second_half, summary, context_text, model, tokenizer,
+            translation_prompt, max_tokens, temperature, verbose,
+            max_retries, retry_delay, output_dir, second_half_id, depth + 1
+        )
+
+        # Combine results
+        combined_result = first_result + second_result
+        print(f"{indent}✅ Combined result: {len(combined_result)} segments")
+        return combined_result
+
+
+def process_single_batch_with_retries(segments: List[Dict[str, Any]], summary: str, context_text: str,
+                                    model, tokenizer, translation_prompt: str, max_tokens: int,
+                                    temperature: float, verbose: bool, max_retries: int,
+                                    retry_delay: float, output_dir: Optional[str],
+                                    batch_id: str, depth: int, indent: str) -> List[Dict[str, Any]]:
+    """
+    Process a single batch with retry logic (no splitting).
+    """
+    # Update context for this batch (use previous segments)
+    batch_context_segments = []
+    if len(segments) > 1:
+        batch_context_segments = segments[:-1]
+    batch_context_text = " ".join([seg['fr'] for seg in batch_context_segments]) if batch_context_segments else ""
+
+    # Convert batch segments to JSON
+    segments_json = json.dumps(segments, ensure_ascii=False, indent=2)
+
+    # Create prompt for this batch
+    prompt = translation_prompt.replace("{summary}", summary).replace("{context}", batch_context_text).replace("{segments}", segments_json)
 
     # Prepare messages for LLM
     messages = [{"role": "user", "content": prompt}]
     formatted_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
 
-    # Retry loop for this split batch
-    split_translated = None
+    # Retry loop for this batch
     last_error = None
 
     for retry_count in range(max_retries + 1):  # +1 for initial attempt
@@ -388,18 +471,17 @@ def process_split_batch(split_segments: List[Dict[str, Any]], summary: str, cont
             generation_time = time.time() - generation_start_time
 
             # Validate and parse response
-            split_translated = validate_and_parse_batch_response(response, split_segments, -1)  # Use -1 for split batches
+            batch_translated = validate_and_parse_batch_response(response, segments, -1)  # Use -1 for split batches
 
             # Save response for this attempt
             if output_dir:
                 retry_suffix = f"_retry_{retry_count}" if retry_count > 0 else ""
                 output_path = Path(output_dir)
-                response_file = output_path / f"07_llm_response_{split_id}{retry_suffix}.txt"
+                response_file = output_path / f"07_llm_response_{batch_id}{retry_suffix}.txt"
                 with open(response_file, 'w', encoding='utf-8') as f:
-                    f.write(f"=== SPLIT BATCH RESPONSE: {split_id.upper()} ===\n\n")
-                    f.write(f"Original Batch: {original_batch_num}\n")
-                    f.write(f"Split Name: {split_name}\n")
-                    f.write(f"Segments: {len(split_segments)}\n")
+                    f.write(f"=== BATCH RESPONSE: {batch_id.upper()} ===\n\n")
+                    f.write(f"Depth: {depth}\n")
+                    f.write(f"Segments: {len(segments)}\n")
                     f.write(f"Attempt: {retry_count + 1}/{max_retries + 1}\n")
                     f.write(f"Generation Time: {generation_time:.3f} seconds\n\n")
                     f.write("=== RESPONSE ===\n")
@@ -407,20 +489,32 @@ def process_split_batch(split_segments: List[Dict[str, Any]], summary: str, cont
                     f.write(response)
                     f.write("\n" + "-" * 80 + "\n")
 
-            print(f"    ✅ {split_name.capitalize()} completed successfully on attempt {retry_count + 1}")
-            break
+            if depth == 0:
+                print(f"    ✅ Batch completed successfully on attempt {retry_count + 1}")
+            else:
+                print(f"{indent}✅ Batch completed successfully on attempt {retry_count + 1}")
+
+            return batch_translated
 
         except ValueError as e:
             last_error = e
             if retry_count < max_retries:
-                print(f"    ⚠️  {split_name.capitalize()} failed (attempt {retry_count + 1}/{max_retries + 1}): {e}")
+                if depth == 0:
+                    print(f"    ⚠️  Batch failed (attempt {retry_count + 1}/{max_retries + 1}): {e}")
+                else:
+                    print(f"{indent}⚠️  Batch failed (attempt {retry_count + 1}/{max_retries + 1}): {e}")
                 time.sleep(retry_delay)
             else:
-                error_msg = f"❌ {split_name.capitalize()} failed after {max_retries + 1} attempts: {e}"
-                print(error_msg)
-                raise RuntimeError(error_msg)
-
-    return split_translated
+                if len(segments) == 1:
+                    # Single sentence failed completely - raise error and exit
+                    error_msg = f"❌ Single sentence failed after {max_retries + 1} attempts: {e}"
+                    print(f"{indent}{error_msg}")
+                    raise RuntimeError(error_msg)
+                else:
+                    # Multi-sentence batch failed - this should be handled by recursive splitting
+                    error_msg = f"❌ Batch failed after {max_retries + 1} attempts: {e}"
+                    print(f"{indent}{error_msg}")
+                    raise RuntimeError(error_msg)
 
 def batch_translate(segments: List[Dict[str, Any]], summary: str,
                    output_dir: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -504,12 +598,7 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
         segments_json = json.dumps(batch_segments, ensure_ascii=False, indent=2)
 
         # Replace placeholders in the prompt template
-        try:
-            prompt = translation_prompt.format(summary=summary, context=context_text, segments=segments_json)
-        except KeyError as e:
-            raise ValueError(f"Missing placeholder in translation prompt template: {e}")
-        except Exception as e:
-            raise ValueError(f"Error formatting translation prompt: {e}")
+        prompt = translation_prompt.replace("{summary}", summary).replace("{context}", context_text).replace("{segments}", segments_json)
 
         # Create comprehensive batch report
         if output_dir:
@@ -586,88 +675,66 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
                 f.write(response)
                 f.write("\n" + "-" * 80 + "\n")
 
-        # Track if batch was split
-        was_split = False
-        split_info = ""
-
         # Initial validation attempt
         try:
             # Validate and parse the response
             batch_translated = validate_and_parse_batch_response(response, batch_segments, batch_num)
 
+            # Update batch report with successful parsing
+            if output_dir:
+                with open(report_file, 'a', encoding='utf-8') as f:
+                    f.write("\n=== PARSED TRANSLATIONS ===\n")
+                    f.write(f"Successfully parsed {len(batch_translated)} translated segments\n\n")
+                    for i, item in enumerate(batch_translated):
+                        f.write(f"  {i+1}. Index {item['index']}: '{item['zh']}'\n")
+                    f.write("\n")
+
+                    f.write("=== VALIDATION ===\n")
+                    f.write(f"✓ Passed validation on first attempt (no splitting needed)\n")
+                    f.write(f"✓ Parsed JSON successfully\n")
+                    f.write(f"✓ Output count matches input ({len(batch_translated)} segments)\n")
+                    f.write(f"✓ All items have 'index' field\n")
+                    f.write(f"✓ All indexes match input\n")
+                    f.write(f"✓ All items have 'zh' field\n")
+                    f.write(f"✓ All translations contain valid content (Chinese characters or numbers-only)\n")
+                    f.write(f"✓ No translations identical to French\n")
+                    f.write(f"✓ Batch {batch_num + 1} completed successfully\n")
+
+            print(f"✅ Batch {batch_num + 1} completed successfully ({len(batch_translated)} segments): {len(batch_translated)} segments translated in {batch_total_time:.3f}s")
+
         except ValueError as e:
             print(f"⚠️  Batch {batch_num + 1} failed validation: {e}")
-            print(f"🔄 Splitting batch {batch_num + 1} ({len(batch_segments)} segments) into smaller batches...")
-
-            was_split = True
-            split_info = f" (split from {len(batch_segments)} → {len(batch_segments)//2} + {len(batch_segments) - len(batch_segments)//2})"
+            print(f"🔄 Starting recursive splitting for batch {batch_num + 1} ({len(batch_segments)} segments)...")
 
             # Log the split decision
             if output_dir:
                 with open(report_file, 'a', encoding='utf-8') as f:
                     f.write(f"\n=== BATCH SPLIT DECISION ===\n")
                     f.write(f"Original batch {batch_num + 1} failed with error: {e}\n")
-                    f.write(f"Splitting {len(batch_segments)} segments into smaller batches\n")
+                    f.write(f"Starting recursive splitting of {len(batch_segments)} segments\n")
                     f.write(f"Original response saved to: {response_file}\n")
 
-            # Split batch into two smaller batches
-            mid_point = len(batch_segments) // 2
-            first_half = batch_segments[:mid_point]
-            second_half = batch_segments[mid_point:]
-
-            # Process first half
-            first_half_translated = process_split_batch(
-                first_half, summary, context_text, model, tokenizer,
+            # Use recursive processing
+            batch_start_recursive = time.time()
+            batch_translated = process_batch_recursive(
+                batch_segments, summary, context_text, model, tokenizer,
                 translation_prompt, max_tokens, temperature, verbose,
-                max_retries, retry_delay, output_dir,
-                f"{batch_id}_part1", batch_num + 1, "first half"
+                max_retries, retry_delay, output_dir, batch_id
             )
+            batch_recursive_time = time.time() - batch_start_recursive
 
-            # Process second half
-            second_half_translated = process_split_batch(
-                second_half, summary, context_text, model, tokenizer,
-                translation_prompt, max_tokens, temperature, verbose,
-                max_retries, retry_delay, output_dir,
-                f"{batch_id}_part2", batch_num + 1, "second half"
-            )
+            # Update batch report with recursive success
+            if output_dir:
+                with open(report_file, 'a', encoding='utf-8') as f:
+                    f.write(f"\n=== RECURSIVE SPLITTING SUCCESS ===\n")
+                    f.write(f"Total segments processed: {len(batch_translated)}\n")
+                    f.write(f"Recursive processing time: {batch_recursive_time:.3f} seconds\n")
+                    f.write(f"✓ All sub-batches completed successfully\n")
 
-            # Combine the results
-            batch_translated = first_half_translated + second_half_translated
-
-            print(f"✅ Batch {batch_num + 1} completed successfully after splitting: {len(batch_translated)} total segments")
+            print(f"✅ Batch {batch_num + 1} completed successfully after recursive splitting: {len(batch_translated)} segments translated in {batch_recursive_time:.3f}s (recursive)")
 
         # If we got here, validation passed
         translated_segments.extend(batch_translated)
-
-        # Update batch report with successful parsing
-        if output_dir:
-            with open(report_file, 'a', encoding='utf-8') as f:
-                f.write("\n=== PARSED TRANSLATIONS ===\n")
-                f.write(f"Successfully parsed {len(batch_translated)} translated segments\n\n")
-                for i, item in enumerate(batch_translated):
-                    f.write(f"  {i+1}. Index {item['index']}: '{item['zh']}'\n")
-                f.write("\n")
-
-                f.write("=== VALIDATION ===\n")
-                if was_split:
-                    f.write(f"✓ Passed validation after splitting batch\n")
-                    f.write(f"✓ Original batch split into {len(batch_segments)//2} + {len(batch_segments) - len(batch_segments)//2} segments\n")
-                else:
-                    f.write(f"✓ Passed validation on first attempt (no splitting needed)\n")
-                f.write(f"✓ Parsed JSON successfully\n")
-                f.write(f"✓ Output count matches input ({len(batch_translated)} segments)\n")
-                f.write(f"✓ All items have 'index' field\n")
-                f.write(f"✓ All indexes match input\n")
-                f.write(f"✓ All items have 'zh' field\n")
-                f.write(f"✓ All translations contain Chinese characters\n")
-                f.write(f"✓ No translations identical to French\n")
-                f.write(f"✓ Batch {batch_num + 1} completed successfully\n")
-
-        # Use split information for status message
-        if was_split:
-            print(f"✅ Batch {batch_num + 1} completed successfully{split_info}: {len(batch_translated)} segments translated in {batch_total_time:.3f}s")
-        else:
-            print(f"✅ Batch {batch_num + 1} completed successfully ({len(batch_translated)} segments): {len(batch_translated)} segments translated in {batch_total_time:.3f}s")
 
     print(f"All batches completed. Total segments translated: {len(translated_segments)}")
 
@@ -690,8 +757,12 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
 
             for i, item in enumerate(translated_segments):
                 zh = item.get('zh', '')
+                fr = item.get('fr', '')
                 chinese_chars = bool(re.search(r'[\u4e00-\u9fff]', zh))
-                f.write(f"Segment {item.get('index', i)}: zh='{zh}', contains_chinese={chinese_chars}\n")
+                numbers_only = bool(re.match(r'^[\d\s,.\-:;]+$', zh))
+                is_valid = is_valid_translation(zh, fr)
+                content_type = "Chinese" if chinese_chars else ("Numbers-only" if numbers_only else "Other")
+                f.write(f"Segment {item.get('index', i)}: zh='{zh}', valid={is_valid}, type={content_type}\n")
 
         print(f"Translation validation saved to: {validation_file}")
 

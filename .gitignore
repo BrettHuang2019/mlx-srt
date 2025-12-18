@@ -184,4 +184,5 @@ cython_debug/
 tests/audio/
 tests/video/
 tests/output/
+input/
 
