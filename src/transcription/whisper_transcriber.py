@@ -24,7 +24,8 @@ def load_config(config_path="config.yaml"):
         return {
             "whisper": {
                 "model_path": "models/large",
-                "initial_prompt": None
+                "initial_prompt": None,
+                "language": "french"
             }
         }
 
@@ -58,6 +59,11 @@ def transcribe_audio(speech_file, config_path="config.yaml"):
     whisper_params = {
         "path_or_hf_repo": whisper_config.get("model_path", "models/large")
     }
+
+    # Add language if specified
+    language = whisper_config.get("language")
+    if language:
+        whisper_params["language"] = language
 
     # Add initial_prompt if specified
     initial_prompt = whisper_config.get("initial_prompt")

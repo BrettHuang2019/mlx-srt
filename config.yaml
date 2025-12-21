@@ -1,13 +1,14 @@
 whisper:
   model_path: "mlx-community/whisper-large-v3-turbo"
   initial_prompt: null
+  language: "french"
 
 translation:
   model_path: "mlx-community/Qwen2.5-7B-Instruct-4bit"
   batch_size: 20
   max_tokens: 2048
   temperature: 0.5
-  max_retries: 2
+  max_retries: 1
   retry_delay: 1.0
   summary_prompt: "用中文简短总结以下内容(150字以内)： {text}"
   translation_prompt: |

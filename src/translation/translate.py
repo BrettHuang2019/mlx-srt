@@ -912,7 +912,7 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
 
     # Step 1: Refine segments using segment_refiner
     print("\nStep 1: Refining Whisper segments...")
-    refined_result = refine_segments(whisper_transcript)
+    refined_result = refine_segments(whisper_transcript, output_dir)
 
     # Create refined transcript structure
     refined_transcript = {

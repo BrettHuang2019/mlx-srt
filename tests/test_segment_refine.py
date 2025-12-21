@@ -211,16 +211,19 @@ class TestRealWorldData:
             ]
         }
         result = refine_segments(whisper_output)
-        # Should preserve leading spaces for the first segment and any that had them originally
+        # New rule removes leading spaces from text
         assert len(result["segments"]) == 2
-        # Find the segment that should start with space (the "Collection compétence" one)
+        # Find the segment with "Collection compétence"
         competence_segment = None
         for segment in result["segments"]:
             if "Collection compétence" in segment["text"]:
                 competence_segment = segment
                 break
         assert competence_segment is not None
-        assert competence_segment["text"].startswith(" ")
+        # Leading spaces should now be removed
+        assert not competence_segment["text"].startswith(" ")
+        assert competence_segment["text"] == "Collection compétence."
+        assert result["statistics"]["leading_spaces_removed"] == 2
 
     def test_remove_empty_segments(self):
         """Test removal of empty segments like ids 41-47 in real data"""
@@ -257,7 +260,7 @@ class TestEdgeCases:
         assert result["statistics"]["empty_segments_removed"] == 1
 
     def test_segments_with_only_punctuation(self):
-        """Segments with only punctuation should be handled"""
+        """Segments with only punctuation should be handled (removed by new rule)"""
         whisper_output = {
             "text": "! Normal text",
             "segments": [
@@ -266,8 +269,10 @@ class TestEdgeCases:
             ]
         }
         result = refine_segments(whisper_output)
-        # Should not crash and handle appropriately
-        assert len(result["segments"]) == 2
+        # New rule removes punctuation-only segments
+        assert len(result["segments"]) == 1
+        assert result["segments"][0]["text"] == "Normal text"
+        assert result["statistics"]["punctuation_only_segments_removed"] == 1
 
     def test_last_segment_without_period_not_merged(self):
         """Last segment without period should not be merged (no next segment)"""
@@ -282,6 +287,248 @@ class TestEdgeCases:
         # Last incomplete segment should remain as-is since there's no next segment to merge with
         assert len(result["segments"]) >= 1
         assert result["statistics"]["segments_merged"] == 0
+
+
+class TestRemoveLeadingSpaces:
+    """Test removal of leading spaces from segment text."""
+
+    def test_remove_leading_space_from_single_segment(self):
+        """Remove leading space: ' Thank you.' → 'Thank you.'"""
+        whisper_output = {
+            "text": "Thank you.",
+            "segments": [
+                {"id": 0, "text": " Thank you.", "start": 0.0, "end": 29.98}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Thank you."
+        assert result["statistics"]["leading_spaces_removed"] == 1
+
+    def test_remove_leading_spaces_from_multiple_segments(self):
+        """Remove leading spaces from multiple segments"""
+        whisper_output = {
+            "text": "Hello world. How are you?",
+            "segments": [
+                {"id": 0, "text": " Hello world.", "start": 0.0, "end": 2.0},
+                {"id": 1, "text": " How are you?", "start": 2.0, "end": 4.0}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Hello world."
+        assert result["segments"][1]["text"] == "How are you?"
+        assert result["statistics"]["leading_spaces_removed"] == 2
+
+    def test_preserve_segments_without_leading_spaces(self):
+        """Segments without leading spaces should remain unchanged"""
+        whisper_output = {
+            "text": "Normal text.",
+            "segments": [
+                {"id": 0, "text": "Normal text.", "start": 0.0, "end": 2.0}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Normal text."
+        assert result["statistics"]["leading_spaces_removed"] == 0
+
+
+class TestRemoveDuplicateSegments:
+    """Test removal of duplicate segments occurring 4+ times."""
+
+    def test_remove_segments_occurring_4_times(self):
+        """Remove segments that occur exactly 4 times with identical text"""
+        whisper_output = {
+            "text": "Thank you.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 29.98, "text": "Thank you."},
+                {"id": 1, "start": 30.0, "end": 59.98, "text": "Thank you."},
+                {"id": 2, "start": 60.0, "end": 89.98, "text": "Thank you."},
+                {"id": 3, "start": 90.0, "end": 119.98, "text": "Thank you."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 0
+        assert result["statistics"]["duplicate_segments_removed"] == 4
+
+    def test_remove_segments_occurring_more_than_4_times(self):
+        """Remove segments that occur more than 4 times"""
+        whisper_output = {
+            "text": "Thank you.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 20.0, "text": "Thank you."},
+                {"id": 1, "start": 20.0, "end": 40.0, "text": "Thank you."},
+                {"id": 2, "start": 40.0, "end": 60.0, "text": "Thank you."},
+                {"id": 3, "start": 60.0, "end": 80.0, "text": "Thank you."},
+                {"id": 4, "start": 80.0, "end": 100.0, "text": "Thank you."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 0
+        assert result["statistics"]["duplicate_segments_removed"] == 5
+
+    def test_preserve_segments_occurring_less_than_4_times(self):
+        """Keep segments that occur less than 4 times"""
+        whisper_output = {
+            "text": "Hello. World.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 2.0, "text": "Hello."},
+                {"id": 1, "start": 2.0, "end": 4.0, "text": "Hello."},
+                {"id": 2, "start": 4.0, "end": 6.0, "text": "World."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 3  # All segments preserved
+        assert result["statistics"]["duplicate_segments_removed"] == 0
+
+    def test_case_insensitive_duplicate_detection(self):
+        """Detect duplicates regardless of case"""
+        whisper_output = {
+            "text": "Thank you.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 20.0, "text": "Thank you."},
+                {"id": 1, "start": 20.0, "end": 40.0, "text": "thank you."},
+                {"id": 2, "start": 40.0, "end": 60.0, "text": "THANK YOU."},
+                {"id": 3, "start": 60.0, "end": 80.0, "text": "Thank you."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 0
+        assert result["statistics"]["duplicate_segments_removed"] == 4
+
+
+class TestRemoveRepeatedWords:
+    """Test removal of words that repeat 4+ times in the same segment."""
+
+    def test_remove_word_repeated_4_times(self):
+        """Remove word repeated exactly 4 times, keep first occurrence"""
+        whisper_output = {
+            "text": "Trump Trump Trump Trump test.",
+            "segments": [
+                {"id": 870, "start": 1407.14, "end": 1440.4,
+                 "text": "Trump Trump Trump Trump test."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Trump test."
+        assert result["statistics"]["repeated_words_removed"] == 3
+
+    def test_remove_word_repeated_more_than_4_times(self):
+        """Remove word repeated more than 4 times, keep first occurrence"""
+        whisper_output = {
+            "text": "It's great Trump Trump Trump Trump Trump Trump problem.",
+            "segments": [
+                {"id": 870, "start": 1407.14, "end": 1440.4,
+                 "text": "It's great Trump Trump Trump Trump Trump Trump problem."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "It's great Trump problem."
+        assert result["statistics"]["repeated_words_removed"] == 5
+
+    def test_preserve_words_repeated_less_than_4_times(self):
+        """Keep words that repeat less than 4 times"""
+        whisper_output = {
+            "text": "Hello hello world.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 2.0, "text": "Hello hello world."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Hello hello world."
+        assert result["statistics"]["repeated_words_removed"] == 0
+
+    def test_handle_punctuation_around_repeated_words(self):
+        """Handle punctuation around repeated words correctly - strips punctuation for comparison"""
+        whisper_output = {
+            "text": "Word, word, word, word, word.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 2.0, "text": "Word, word, word, word, word."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        # Current implementation strips punctuation and treats "Word," and "word" as the same word
+        # So it removes duplicates and keeps only the first occurrence
+        assert result["segments"][0]["text"] == "Word,"  # Only first occurrence kept
+        assert result["statistics"]["repeated_words_removed"] == 4
+
+    def test_multiple_different_repeated_words(self):
+        """Handle multiple different words repeated 4+ times"""
+        whisper_output = {
+            "text": "Trump Trump Trump Trump word word word word test.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 5.0,
+                 "text": "Trump Trump Trump Trump word word word word test."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Trump word test."
+        assert result["statistics"]["repeated_words_removed"] == 6  # 3 Trump + 3 word
+
+
+class TestRemovePunctuationOnlySegments:
+    """Test removal of segments containing only punctuation/signs."""
+
+    def test_remove_exclamation_mark_only_segment(self):
+        """Remove segment containing only '!'"""
+        whisper_output = {
+            "text": "!",
+            "segments": [
+                {"index": 1489, "fr": "!"}  # Using the exact structure from the example
+            ]
+        }
+        # Convert to standard format for processing
+        standard_format = {
+            "text": "!",
+            "segments": [
+                {"id": 1489, "start": 0.0, "end": 1.0, "text": "!"}
+            ]
+        }
+        result = refine_segments(standard_format)
+        assert len(result["segments"]) == 0
+        assert result["statistics"]["punctuation_only_segments_removed"] == 1
+
+    def test_remove_multiple_punctuation_only_segments(self):
+        """Remove segments with various punctuation-only content"""
+        whisper_output = {
+            "text": "! ? . , ; :",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": "!"},
+                {"id": 1, "start": 1.0, "end": 2.0, "text": "?"},
+                {"id": 2, "start": 2.0, "end": 3.0, "text": "..."},
+                {"id": 3, "start": 3.0, "end": 4.0, "text": "@#$"}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 0
+        assert result["statistics"]["punctuation_only_segments_removed"] == 4
+
+    def test_preserve_segments_with_alphanumeric_content(self):
+        """Keep segments that contain letters or numbers"""
+        whisper_output = {
+            "text": "Hello! 123.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 2.0, "text": "Hello!"},
+                {"id": 1, "start": 2.0, "end": 4.0, "text": "123."},
+                {"id": 2, "start": 4.0, "end": 6.0, "text": "A!"}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 3
+        assert result["statistics"]["punctuation_only_segments_removed"] == 0
+
+    def test_handle_mixed_content_segments(self):
+        """Keep segments with mixed punctuation and alphanumeric content"""
+        whisper_output = {
+            "text": "!Hello? World.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 2.0, "text": "!Hello?"},
+                {"id": 1, "start": 2.0, "end": 4.0, "text": " World."}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        # Both segments should be preserved since they contain alphanumeric content
+        # and the first ends with sentence-ending punctuation
+        assert len(result["segments"]) == 2
+        assert result["statistics"]["punctuation_only_segments_removed"] == 0
 
 
 class TestSequentialIDRegeneration:
