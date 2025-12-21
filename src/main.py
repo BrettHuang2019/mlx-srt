@@ -9,10 +9,26 @@ This script orchestrates the complete pipeline for:
 4. Translation from French to Chinese using MLX-LM
 5. SRT subtitle generation
 
+Features:
+- Automatic state management and resumption
+- Robust error recovery
+- Batch-level progress tracking
+- JSON format for LLM responses
+
 Usage:
     python src/main.py input_file.mp3
     python src/main.py input_file.mp4 [--output output_dir]
     python src/main.py --help
+
+Auto-Resume:
+The pipeline automatically detects and resumes from existing state files.
+If you run the same command with the same output directory, it will:
+1. Check for existing state.json
+2. Validate completed steps and files
+3. Resume from the first incomplete step
+4. Skip already processed batches
+
+Use --resume flag to explicitly require existing state (fails if none found).
 """
 
 import argparse
@@ -31,12 +47,13 @@ from translation.translate import translation_pipeline
 from subtitle.generate_srt import generate_srt_from_segments
 
 
-def process_audio_file(audio_path: str, output_dir: str) -> Dict[str, Any]:
+def process_audio_file(audio_path: str, output_dir: str, resume: bool = False) -> Dict[str, Any]:
     """Process audio file through transcription and translation pipeline.
 
     Args:
         audio_path: Path to audio file
         output_dir: Directory to save intermediate and final files
+        resume: Whether to resume from last checkpoint
 
     Returns:
         Translated transcript with Chinese translations
@@ -47,29 +64,38 @@ def process_audio_file(audio_path: str, output_dir: str) -> Dict[str, Any]:
     print(f"Input: {audio_path}")
     print(f"Output: {output_dir}")
 
-    # Step 1: Transcription
-    print(f"\nStep 1: Transcribing audio...")
-    whisper_result = transcribe_audio(audio_path)
-
-    # Save transcription
+    # For resume mode, check if transcription already exists
     transcription_file = Path(output_dir) / "00_whisper_transcription.json"
-    with open(transcription_file, 'w', encoding='utf-8') as f:
-        json.dump(whisper_result, f, ensure_ascii=False, indent=2)
-    print(f"Transcription saved: {transcription_file}")
+    whisper_result = None
+
+    if resume and transcription_file.exists():
+        print(f"\nStep 1: Loading existing transcription...")
+        with open(transcription_file, 'r', encoding='utf-8') as f:
+            whisper_result = json.load(f)
+        print(f"Transcription loaded: {transcription_file}")
+    else:
+        print(f"\nStep 1: Transcribing audio...")
+        whisper_result = transcribe_audio(audio_path)
+
+        # Save transcription
+        with open(transcription_file, 'w', encoding='utf-8') as f:
+            json.dump(whisper_result, f, ensure_ascii=False, indent=2)
+        print(f"Transcription saved: {transcription_file}")
 
     # Step 2: Translation pipeline
     print(f"\nStep 2: Running translation pipeline...")
-    translated_transcript = translation_pipeline(whisper_result, output_dir)
+    translated_transcript = translation_pipeline(whisper_result, output_dir, resume)
 
     return translated_transcript
 
 
-def process_video_file(video_path: str, output_dir: str) -> Dict[str, Any]:
+def process_video_file(video_path: str, output_dir: str, resume: bool = False) -> Dict[str, Any]:
     """Process video file through audio extraction, transcription, and translation.
 
     Args:
         video_path: Path to video file
         output_dir: Directory to save intermediate and final files
+        resume: Whether to resume from last checkpoint
 
     Returns:
         Translated transcript with Chinese translations
@@ -80,19 +106,24 @@ def process_video_file(video_path: str, output_dir: str) -> Dict[str, Any]:
     print(f"Input: {video_path}")
     print(f"Output: {output_dir}")
 
-    # Step 1: Extract audio from video
-    print(f"\nStep 1: Extracting audio from video...")
+    # Step 1: Extract audio from video (skip if resuming and audio already exists)
     extracted_audio_path = Path(output_dir) / "extracted_audio.wav"
-    extract_audio(video_path, str(extracted_audio_path))
 
-    # Verify audio extraction
-    if not extracted_audio_path.exists():
-        raise RuntimeError(f"Audio extraction failed: {extracted_audio_path}")
+    if resume and extracted_audio_path.exists():
+        print(f"\nStep 1: Using existing extracted audio...")
+        print(f"Audio file: {extracted_audio_path}")
+    else:
+        print(f"\nStep 1: Extracting audio from video...")
+        extract_audio(video_path, str(extracted_audio_path))
 
-    print(f"Audio extracted: {extracted_audio_path}")
+        # Verify audio extraction
+        if not extracted_audio_path.exists():
+            raise RuntimeError(f"Audio extraction failed: {extracted_audio_path}")
+
+        print(f"Audio extracted: {extracted_audio_path}")
 
     # Step 2: Process extracted audio through the same pipeline
-    return process_audio_file(str(extracted_audio_path), output_dir)
+    return process_audio_file(str(extracted_audio_path), output_dir, resume)
 
 
 def generate_srt_file(translated_transcript: Dict[str, Any], output_path: str) -> None:
@@ -145,6 +176,12 @@ Examples:
 
   # Process with SRT output in specific location
   python src/main.py audio.mp3 --srt-output /path/to/subtitles.srt
+
+  # Automatically resume from last checkpoint (if state exists)
+  python src/main.py video.mp4 --keep-artifacts
+
+  # Explicitly require resuming from existing state
+  python src/main.py video.mp4 --resume --keep-artifacts
         """
     )
 
@@ -177,7 +214,47 @@ Examples:
         help="Keep the output folder with intermediate artifacts (default: clean up on success)"
     )
 
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Require resuming from existing state (fails if no state found). Without this flag, will auto-resume if state exists."
+    )
+
     args = parser.parse_args()
+
+    # Determine output directory and check for existing state
+    if args.output:
+        output_dir = Path(args.output)
+    else:
+        # Default to input filename + "_output"
+        input_path = Path(args.input_file)
+        output_dir = input_path.parent / f"{input_path.stem}_output"
+
+    # Check for existing state and auto-resume if available
+    auto_resume = False
+    if output_dir.exists():
+        state_file = output_dir / "state.json"
+        if state_file.exists():
+            auto_resume = True
+            print(f"📋 Found existing state in: {output_dir}")
+            print(f"🔄 Will automatically resume from last checkpoint")
+
+    # Only validate explicit resume flag
+    if args.resume and not auto_resume:
+        if not output_dir.exists():
+            print(f"Error: Cannot resume - output directory does not exist: {output_dir}")
+            print(f"Please run without --resume first to create the output directory.")
+            sys.exit(1)
+
+        state_file = output_dir / "state.json"
+        if not state_file.exists():
+            print(f"Error: Cannot resume - no state file found: {state_file}")
+            print(f"Please run without --resume first to create the initial state.")
+            sys.exit(1)
+
+        print(f"📋 Explicitly resuming from existing state in: {output_dir}")
+    elif args.resume and auto_resume:
+        print(f"📋 Resume flag specified - using existing state in: {output_dir}")
 
     # Validate input file
     input_path = Path(args.input_file)
@@ -185,12 +262,7 @@ Examples:
         print(f"Error: Input file does not exist: {input_path}")
         sys.exit(1)
 
-    # Create output directory
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        # Default to input filename + "_output"
-        output_dir = input_path.parent / f"{input_path.stem}_output"
+    # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine file type
@@ -201,10 +273,11 @@ Examples:
 
     try:
         # Process file based on type
+        resume_flag = args.resume or auto_resume
         if file_extension in audio_extensions:
-            translated_transcript = process_audio_file(str(input_path), str(output_dir))
+            translated_transcript = process_audio_file(str(input_path), str(output_dir), resume_flag)
         elif file_extension in video_extensions:
-            translated_transcript = process_video_file(str(input_path), str(output_dir))
+            translated_transcript = process_video_file(str(input_path), str(output_dir), resume_flag)
         else:
             print(f"Error: Unsupported file format: {file_extension}")
             print(f"Supported audio formats: {', '.join(sorted(audio_extensions))}")

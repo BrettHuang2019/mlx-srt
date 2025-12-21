@@ -20,6 +20,160 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from transcription.segment_refiner import refine_segments
 
+# State Management Functions
+def load_state(output_dir: str) -> Dict[str, Any]:
+    """Load existing state from state.json file"""
+    state_file = Path(output_dir) / "state.json"
+    if state_file.exists():
+        with open(state_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
+
+def save_state(state: Dict[str, Any], output_dir: str):
+    """Save current state to state.json file"""
+    state_file = Path(output_dir) / "state.json"
+    with open(state_file, 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def create_initial_state(whisper_transcript: str, output_dir: str) -> Dict[str, Any]:
+    """Create initial state structure for a new translation pipeline"""
+    import uuid
+    return {
+        "pipeline_info": {
+            "pipeline_id": f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
+            "start_time": datetime.now().isoformat(),
+            "status": "running",
+            "last_checkpoint": datetime.now().isoformat()
+        },
+        "input_files": {
+            "whisper_transcript": whisper_transcript,
+            "output_directory": output_dir
+        },
+        "completed_steps": [],
+        "current_step": None,
+        "steps": {
+            "refinement": {"status": "pending", "file": "01_refined_transcript.json"},
+            "summary": {"status": "pending", "file": "04_summary.txt"},
+            "preprocessing": {"status": "pending", "files": ["02_filtered_segments.json", "03_ordered_segments.json", "03b_regenerated_ids_segments.json"]},
+            "translation": {
+                "status": "pending",
+                "total_batches": 0,
+                "completed_batches": [],
+                "failed_batches": [],
+                "current_batch": None
+            },
+            "validation": {"status": "pending"},
+            "merging": {"status": "pending"},
+            "final_output": {"status": "pending"}
+        }
+    }
+
+def update_step_status(state: Dict[str, Any], step_name: str, status: str, **kwargs):
+    """Update status of a pipeline step"""
+    state["steps"][step_name]["status"] = status
+
+    if status == "completed":
+        if step_name not in state["completed_steps"]:
+            state["completed_steps"].append(step_name)
+        state["steps"][step_name]["end_time"] = datetime.now().isoformat()
+    elif status == "running":
+        state["steps"][step_name]["start_time"] = datetime.now().isoformat()
+        state["current_step"] = step_name
+
+    # Add any additional parameters
+    for key, value in kwargs.items():
+        state["steps"][step_name][key] = value
+
+    state["pipeline_info"]["last_checkpoint"] = datetime.now().isoformat()
+
+def update_batch_status(state: Dict[str, Any], batch_id: str, status: str, **kwargs):
+    """Update status of a translation batch"""
+    if "translation" not in state["steps"]:
+        return
+
+    translation_step = state["steps"]["translation"]
+
+    if status == "completed":
+        if batch_id not in translation_step["completed_batches"]:
+            translation_step["completed_batches"].append(batch_id)
+        # Remove from failed batches if it was previously failed
+        if batch_id in translation_step["failed_batches"]:
+            translation_step["failed_batches"].remove(batch_id)
+    elif status == "failed":
+        if batch_id not in translation_step["failed_batches"]:
+            translation_step["failed_batches"].append(batch_id)
+    elif status == "running":
+        translation_step["current_batch"] = batch_id
+
+    # Add any additional parameters
+    if "batch_details" not in translation_step:
+        translation_step["batch_details"] = {}
+
+    if batch_id not in translation_step["batch_details"]:
+        translation_step["batch_details"][batch_id] = {}
+
+    for key, value in kwargs.items():
+        translation_step["batch_details"][batch_id][key] = value
+
+    state["pipeline_info"]["last_checkpoint"] = datetime.now().isoformat()
+
+def get_resume_point(state: Dict[str, Any], output_dir: str) -> Optional[str]:
+    """Determine where to resume the pipeline based on state and existing files"""
+    if not state:
+        return None
+
+    # Check each step in order
+    step_order = ["refinement", "summary", "preprocessing", "translation", "validation", "merging", "final_output"]
+
+    for step in step_order:
+        step_status = state["steps"][step]["status"]
+
+        if step_status == "completed":
+            # Verify files exist
+            if "file" in state["steps"][step]:
+                file_path = Path(output_dir) / state["steps"][step]["file"]
+                if not file_path.exists():
+                    print(f"⚠️  Missing file for completed step {step}: {file_path}")
+                    return step  # Resume from this step
+            elif "files" in state["steps"][step]:
+                for file_name in state["steps"][step]["files"]:
+                    file_path = Path(output_dir) / file_name
+                    if not file_path.exists():
+                        print(f"⚠️  Missing file for completed step {step}: {file_path}")
+                        return step  # Resume from this step
+
+        elif step_status in ["failed", "running"]:
+            return step  # Resume from failed or running step
+
+        elif step_status == "pending":
+            return step  # Start this step
+
+    # All steps completed
+    return None
+
+def validate_completed_files(state: Dict[str, Any], output_dir: str) -> bool:
+    """Validate that all files for completed steps exist"""
+    if not state:
+        return True
+
+    for step_name in state["completed_steps"]:
+        step = state["steps"][step_name]
+
+        if "file" in step:
+            file_path = Path(output_dir) / step["file"]
+            if not file_path.exists():
+                print(f"❌ Missing file for step {step_name}: {file_path}")
+                return False
+
+        elif "files" in step:
+            for file_name in step["files"]:
+                file_path = Path(output_dir) / file_name
+                if not file_path.exists():
+                    print(f"❌ Missing file for step {step_name}: {file_path}")
+                    return False
+
+    return True
+
 def convert_segments_to_translation_format(segments: List[Dict[str, Any]],
                                           output_dir: Optional[str] = None) -> List[Dict[str, Any]]:
     """
@@ -120,8 +274,9 @@ def regenerate_sequential_ids(segments: List[Dict[str, Any]],
 
 def is_valid_translation(zh: str, original_fr: str = "") -> bool:
     """
-    Validate translation: either contains Chinese characters or contains only numbers/punctuation.
-    Returns False if empty or identical to original French (except for numbers-only content).
+    Validate translation: either contains Chinese characters, contains only numbers/punctuation,
+    or is a name/expression that should remain in original language, or is a different translation.
+    Returns False if empty or identical to original French (except for numbers-only content and names).
     """
     if not zh or not zh.strip():
         return False
@@ -140,11 +295,22 @@ def is_valid_translation(zh: str, original_fr: str = "") -> bool:
         # For numbers-only content, allow it to be identical to French (statistical data)
         return True
 
+    # Check if it's a name, proper noun, or expression that should remain in original language
+    # Allow single words or short phrases that are likely names/proper nouns
+    words = zh.split()
+    if len(words) <= 3 and zh.lower() == original_fr.lower():
+        # Likely a name or expression that should remain unchanged
+        return True
+
+    # If it's different from the original, it's a valid translation (even without Chinese characters)
+    if zh.lower() != original_fr.lower():
+        return True
+
     return False
 
 def verify_translation_contains_chinese_characters(translated_items: List[Dict[str, Any]]) -> bool:
     """
-    Verify that translations contain valid content (Chinese characters or numbers-only).
+    Verify that translations contain valid content (Chinese characters, numbers-only, or names/expressions).
     """
     for item in translated_items:
         zh = item.get('zh', '').strip()
@@ -354,17 +520,21 @@ def validate_and_parse_batch_response(response: str, batch_segments: List[Dict[s
         if not zh:
             raise ValueError(f"Batch {batch_num + 1} item {i} has empty translation")
 
-        # Use the updated validation logic that allows numbers-only translations
+        # Use the updated validation logic that allows numbers-only translations and names
         if not is_valid_translation(zh, original_fr):
             # Determine the specific error type for better error messages
             chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
             numbers_pattern = re.compile(r'^[\d\s,.\-:;]+$')
+            words = zh.split()
 
             if chinese_pattern.search(zh):
                 raise ValueError(f"Batch {batch_num + 1} item {i} Chinese translation is identical to original French: '{zh}'")
             elif numbers_pattern.match(zh):
                 # This shouldn't happen with our updated logic, but just in case
                 pass  # Numbers-only should always be valid
+            elif len(words) <= 3 and zh.lower() == original_fr.lower():
+                # This shouldn't happen with our updated logic, but just in case
+                pass  # Names/expressions should always be valid
             else:
                 raise ValueError(f"Batch {batch_num + 1} item {i} translation has invalid content: '{zh}'")
 
@@ -477,17 +647,18 @@ def process_single_batch_with_retries(segments: List[Dict[str, Any]], summary: s
             if output_dir:
                 retry_suffix = f"_retry_{retry_count}" if retry_count > 0 else ""
                 output_path = Path(output_dir)
-                response_file = output_path / f"07_llm_response_{batch_id}{retry_suffix}.txt"
+                response_file = output_path / f"07_llm_response_{batch_id}{retry_suffix}.json"
+                response_data = {
+                    "batch_id": batch_id,
+                    "depth": depth,
+                    "segments_count": len(segments),
+                    "attempt": retry_count + 1,
+                    "max_attempts": max_retries + 1,
+                    "generation_time_seconds": generation_time,
+                    "raw_response": response
+                }
                 with open(response_file, 'w', encoding='utf-8') as f:
-                    f.write(f"=== BATCH RESPONSE: {batch_id.upper()} ===\n\n")
-                    f.write(f"Depth: {depth}\n")
-                    f.write(f"Segments: {len(segments)}\n")
-                    f.write(f"Attempt: {retry_count + 1}/{max_retries + 1}\n")
-                    f.write(f"Generation Time: {generation_time:.3f} seconds\n\n")
-                    f.write("=== RESPONSE ===\n")
-                    f.write("-" * 80 + "\n")
-                    f.write(response)
-                    f.write("\n" + "-" * 80 + "\n")
+                    json.dump(response_data, f, ensure_ascii=False, indent=2)
 
             if depth == 0:
                 print(f"    ✅ Batch completed successfully on attempt {retry_count + 1}")
@@ -517,7 +688,7 @@ def process_single_batch_with_retries(segments: List[Dict[str, Any]], summary: s
                     raise RuntimeError(error_msg)
 
 def batch_translate(segments: List[Dict[str, Any]], summary: str,
-                   output_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+                   output_dir: Optional[str] = None, state: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Translate segments using LLM with contextual summary.
     Processes segments in batches based on config.batch_size.
@@ -571,6 +742,14 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
     translated_segments = []
     total_batches = (len(segments) + batch_size - 1) // batch_size
 
+    # Initialize state tracking for translation step
+    if state:
+        state["steps"]["translation"]["total_batches"] = total_batches
+        # Clear previous failed batches for fresh start
+        if state["steps"]["translation"].get("status") != "running":
+            state["steps"]["translation"]["completed_batches"] = []
+            state["steps"]["translation"]["failed_batches"] = []
+
     print(f"Processing {len(segments)} segments in {total_batches} batches of size {batch_size}")
 
     for batch_num in range(total_batches):
@@ -583,6 +762,29 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
 
         # Create unique identifier for this batch
         batch_id = f"batch_{batch_num + 1:02d}_segments_{start_idx + 1:03d}_{end_idx:03d}"
+
+        # Check if batch already completed (for resume functionality)
+        if state and batch_id in state["steps"]["translation"].get("completed_batches", []):
+            print(f"  ✅ Batch {batch_id} already completed, skipping...")
+            # Load existing translated segments for this batch
+            response_file = output_path / f"07_llm_response_{batch_id}.json"
+            if response_file.exists():
+                with open(response_file, 'r', encoding='utf-8') as f:
+                    batch_response = json.load(f)
+                batch_translated = validate_and_parse_batch_response(batch_response["raw_response"], batch_segments, -1)
+                translated_segments.extend(batch_translated)
+                continue
+            else:
+                print(f"  ⚠️  Response file missing for completed batch {batch_id}, reprocessing...")
+
+        # Update batch status to running
+        if state:
+            update_batch_status(state, batch_id, "running",
+                              batch_num=batch_num + 1,
+                              segments_count=len(batch_segments),
+                              start_index=start_idx + 1,
+                              end_index=end_idx)
+            save_state(state, output_dir)
 
         # Extract context from previous segments (up to 3 sentences before this batch)
         context_segments = []
@@ -652,16 +854,16 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
 
         # Save raw LLM response for each batch with unique name
         if output_dir:
-            response_file = output_path / f"07_llm_response_{batch_id}.txt"
+            response_file = output_path / f"07_llm_response_{batch_id}.json"
+            response_data = {
+                "batch_id": batch_id,
+                "generation_time_seconds": generation_time,
+                "total_batch_time_seconds": batch_total_time,
+                "segments_processed": len(batch_segments),
+                "raw_response": response
+            }
             with open(response_file, 'w', encoding='utf-8') as f:
-                f.write(f"=== LLM RESPONSE: {batch_id.upper()} ===\n\n")
-                f.write(f"Generation Time: {generation_time:.3f} seconds\n")
-                f.write(f"Total Batch Time: {batch_total_time:.3f} seconds\n")
-                f.write(f"Segments Processed: {len(batch_segments)}\n\n")
-                f.write("=== RAW RESPONSE ===\n")
-                f.write("-" * 80 + "\n")
-                f.write(response)
-                f.write("\n" + "-" * 80 + "\n")
+                json.dump(response_data, f, ensure_ascii=False, indent=2)
 
             print(f"LLM response saved to: {response_file}")
 
@@ -696,14 +898,28 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
                     f.write(f"✓ All items have 'index' field\n")
                     f.write(f"✓ All indexes match input\n")
                     f.write(f"✓ All items have 'zh' field\n")
-                    f.write(f"✓ All translations contain valid content (Chinese characters or numbers-only)\n")
+                    f.write(f"✓ All translations contain valid content (Chinese characters, numbers-only, or names/expressions)\n")
                     f.write(f"✓ No translations identical to French\n")
                     f.write(f"✓ Batch {batch_num + 1} completed successfully\n")
 
             print(f"✅ Batch {batch_num + 1} completed successfully ({len(batch_translated)} segments): {len(batch_translated)} segments translated in {batch_total_time:.3f}s")
 
+            # Update batch status to completed
+            if state:
+                update_batch_status(state, batch_id, "completed",
+                                  generation_time_seconds=generation_time,
+                                  total_time_seconds=batch_total_time,
+                                  translated_segments=len(batch_translated))
+                save_state(state, output_dir)
+
         except ValueError as e:
             print(f"⚠️  Batch {batch_num + 1} failed validation: {e}")
+
+            # Update batch status to failed
+            if state:
+                update_batch_status(state, batch_id, "failed", error=str(e))
+                save_state(state, output_dir)
+
             print(f"🔄 Starting recursive splitting for batch {batch_num + 1} ({len(batch_segments)} segments)...")
 
             # Log the split decision
@@ -733,6 +949,15 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
 
             print(f"✅ Batch {batch_num + 1} completed successfully after recursive splitting: {len(batch_translated)} segments translated in {batch_recursive_time:.3f}s (recursive)")
 
+            # Update batch status to completed (after recursive splitting)
+            if state:
+                update_batch_status(state, batch_id, "completed",
+                                  generation_time_seconds=batch_recursive_time,
+                                  total_time_seconds=batch_recursive_time,
+                                  translated_segments=len(batch_translated),
+                                  recursive_splitting=True)
+                save_state(state, output_dir)
+
         # If we got here, validation passed
         translated_segments.extend(batch_translated)
 
@@ -760,8 +985,10 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
                 fr = item.get('fr', '')
                 chinese_chars = bool(re.search(r'[\u4e00-\u9fff]', zh))
                 numbers_only = bool(re.match(r'^[\d\s,.\-:;]+$', zh))
+                words = zh.split()
+                is_name = len(words) <= 3 and zh.lower() == fr.lower() and not chinese_chars and not numbers_only
                 is_valid = is_valid_translation(zh, fr)
-                content_type = "Chinese" if chinese_chars else ("Numbers-only" if numbers_only else "Other")
+                content_type = "Chinese" if chinese_chars else ("Numbers-only" if numbers_only else ("Name/Expression" if is_name else "Other"))
                 f.write(f"Segment {item.get('index', i)}: zh='{zh}', valid={is_valid}, type={content_type}\n")
 
         print(f"Translation validation saved to: {validation_file}")
@@ -863,7 +1090,7 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
         f.write("04_summary.txt - Generated summary of the transcript\n")
         f.write("05_translation_context.txt - Summary and segments sent for translation\n")
         f.write("06_translation_prompt.txt - Full prompt sent to LLM\n")
-        f.write("07_llm_raw_response.txt - Raw response from LLM\n")
+        f.write("07_llm_raw_response.json - Raw response from LLM (JSON format)\n")
         f.write("08_translated_segments.json - Parsed translated segments\n")
         f.write("09_translation_validation.txt - Validation of Chinese characters\n")
         f.write("10_merged_segments.json - Translations merged back to original segments\n")
@@ -877,7 +1104,8 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
 
 
 def translation_pipeline(whisper_transcript: Dict[str, Any],
-                        output_dir: Optional[str] = None) -> Dict[str, Any]:
+                        output_dir: Optional[str] = None,
+                        resume: bool = False) -> Dict[str, Any]:
     """
     Complete pipeline from Whisper transcription to translated transcript.
 
@@ -890,6 +1118,7 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
     Args:
         whisper_transcript: Raw Whisper transcription output with 'text' and 'segments' fields
         output_dir: Directory to save intermediate and final files
+        resume: If True, resume from the last checkpoint instead of starting fresh
 
     Returns:
         Translated transcript with zh fields added to segments
@@ -901,7 +1130,37 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # Initialize or load state
+    if resume:
+        state = load_state(output_dir)
+        if state is None:
+            print("No existing state found, starting fresh pipeline")
+            state = create_initial_state("whisper_transcript", output_dir)
+        else:
+            print(f"Resuming pipeline from state: {state['pipeline_info']['pipeline_id']}")
+            print(f"Status: {state['pipeline_info']['status']}")
+            print(f"Completed steps: {len(state['completed_steps'])}/{len(state['steps'])}")
+
+            # Validate completed files
+            if not validate_completed_files(state, output_dir):
+                print("❌ Some files for completed steps are missing. Cannot resume safely.")
+                return None
+
+            # Check if already completed
+            resume_point = get_resume_point(state, output_dir)
+            if resume_point is None:
+                print("✅ Pipeline already completed!")
+                # Load final transcript
+                final_file = output_path / "11_final_translated_transcript.json"
+                if final_file.exists():
+                    with open(final_file, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+    else:
+        state = create_initial_state("whisper_transcript", output_dir)
+
     print("=== TRANSLATION PIPELINE ===")
+    print(f"Pipeline ID: {state['pipeline_info']['pipeline_id']}")
+    print(f"Mode: {'Resuming' if resume else 'Fresh start'}")
     print(f"Input: Whisper transcription with {len(whisper_transcript.get('segments', []))} segments")
 
     # Save original whisper output
@@ -910,63 +1169,169 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         json.dump(whisper_transcript, f, ensure_ascii=False, indent=2)
     print(f"Original Whisper output saved to: {original_file}")
 
+    # Save initial state
+    save_state(state, output_dir)
+
     # Step 1: Refine segments using segment_refiner
-    print("\nStep 1: Refining Whisper segments...")
-    refined_result = refine_segments(whisper_transcript, output_dir)
+    resume_point = get_resume_point(state, output_dir) if resume else None
+    if resume and resume_point != "refinement":
+        print("\nStep 1: Skipping refinement (already completed)")
+        # Load refined transcript
+        refined_file = output_path / "01_refined_transcript.json"
+        with open(refined_file, 'r', encoding='utf-8') as f:
+            refined_transcript = json.load(f)
+    else:
+        print("\nStep 1: Refining Whisper segments...")
+        update_step_status(state, "refinement", "running")
+        save_state(state, output_dir)
 
-    # Create refined transcript structure
-    refined_transcript = {
-        "text": refined_result["text"],
-        "segments": refined_result["segments"]
-    }
+        refined_result = refine_segments(whisper_transcript, output_dir)
 
-    # Save refined transcript
-    refined_file = output_path / "01_refined_transcript.json"
-    with open(refined_file, 'w', encoding='utf-8') as f:
-        json.dump(refined_transcript, f, ensure_ascii=False, indent=2)
-    print(f"Refined transcript saved to: {refined_file}")
+        # Create refined transcript structure
+        refined_transcript = {
+            "text": refined_result["text"],
+            "segments": refined_result["segments"]
+        }
 
-    # Print refinement statistics
-    stats = refined_result["statistics"]
-    print(f"Refinement stats:")
-    print(f"  - Input segments: {stats['total_input_segments']}")
-    print(f"  - Output segments: {stats['total_output_segments']}")
-    print(f"  - Segments merged: {stats['segments_merged']}")
-    print(f"  - Segments split: {stats['segments_split']}")
-    print(f"  - Punctuation fixes: {stats['punctuation_fixed']}")
+        # Save refined transcript
+        refined_file = output_path / "01_refined_transcript.json"
+        with open(refined_file, 'w', encoding='utf-8') as f:
+            json.dump(refined_transcript, f, ensure_ascii=False, indent=2)
+        print(f"Refined transcript saved to: {refined_file}")
+
+        # Update state
+        stats = refined_result["statistics"]
+        update_step_status(state, "refinement", "completed",
+                          total_input_segments=stats['total_input_segments'],
+                          total_output_segments=stats['total_output_segments'],
+                          segments_merged=stats['segments_merged'],
+                          segments_split=stats['segments_split'],
+                          punctuation_fixed=stats['punctuation_fixed'])
+        save_state(state, output_dir)
+
+    # Initialize stats with default value
+    stats = {}
+
+    # Get refinement statistics
+    if resume and resume_point != "refinement":
+        # Get stats from state when resuming
+        if "refinement" in state["completed_steps"]:
+            stats = state["steps"]["refinement"]
+        print("  - Refinement already completed")
+    else:
+        # Get stats from fresh refinement result
+        if not resume:
+            stats = refined_result["statistics"]
+        else:
+            stats = state["steps"]["refinement"]
+
+    # Always print refinement stats if available
+    if stats:
+        print(f"Refinement stats:")
+        print(f"  - Input segments: {stats.get('total_input_segments', 'N/A')}")
+        print(f"  - Output segments: {stats.get('total_output_segments', 'N/A')}")
+        print(f"  - Segments merged: {stats.get('segments_merged', 'N/A')}")
+        print(f"  - Segments split: {stats.get('segments_split', 'N/A')}")
+        print(f"  - Punctuation fixes: {stats.get('punctuation_fixed', 'N/A')}")
 
     # Step 2: Generate summary
-    print("\nStep 2: Generating summary...")
-    summary = summarize(str(refined_file), output_dir)
+    if resume and resume_point not in ["refinement", "summary"]:
+        print("\nStep 2: Skipping summary generation (already completed)")
+        # Load summary
+        summary_file = output_path / "04_summary.txt"
+        with open(summary_file, 'r', encoding='utf-8') as f:
+            summary = f.read()
+    else:
+        print("\nStep 2: Generating summary...")
+        update_step_status(state, "summary", "running")
+        save_state(state, output_dir)
+
+        summary = summarize(str(refined_file), output_dir)
+        update_step_status(state, "summary", "completed")
+        save_state(state, output_dir)
 
     # Step 3: Preprocess refined segments for translation
-    print("Step 3: Preprocessing refined segments for translation...")
-    segments = refined_transcript.get('segments', [])
+    if resume and resume_point not in ["refinement", "summary", "preprocessing"]:
+        print("\nStep 3: Skipping preprocessing (already completed)")
+        # Load preprocessed segments
+        translation_segments_file = output_path / "01_converted_segments.json"
+        with open(translation_segments_file, 'r', encoding='utf-8') as f:
+            translation_segments = json.load(f)
+        # Load regenerated segments for merging step
+        regenerated_file = output_path / "03b_regenerated_ids_segments.json"
+        with open(regenerated_file, 'r', encoding='utf-8') as f:
+            regenerated_segments = json.load(f)
+    else:
+        print("\nStep 3: Preprocessing refined segments for translation...")
+        update_step_status(state, "preprocessing", "running")
+        save_state(state, output_dir)
 
-    # Filter out ellipsis and empty segments from refined segments
-    filtered_segments = filter_out_empty_and_ellipsis_segments(segments, output_dir)
-    ordered_segments = preserve_segment_order(filtered_segments, output_dir)
-    regenerated_segments = regenerate_sequential_ids(ordered_segments, output_dir)
-    translation_segments = convert_segments_to_translation_format(regenerated_segments, output_dir)
+        segments = refined_transcript.get('segments', [])
+
+        # Filter out ellipsis and empty segments from refined segments
+        filtered_segments = filter_out_empty_and_ellipsis_segments(segments, output_dir)
+        ordered_segments = preserve_segment_order(filtered_segments, output_dir)
+        regenerated_segments = regenerate_sequential_ids(ordered_segments, output_dir)
+        translation_segments = convert_segments_to_translation_format(regenerated_segments, output_dir)
+
+        update_step_status(state, "preprocessing", "completed",
+                          input_segments=len(segments),
+                          output_segments=len(translation_segments))
+        save_state(state, output_dir)
 
     # Step 4: Translate segments
-    print("Step 4: Translating segments...")
-    translated_segments = batch_translate(translation_segments, summary, output_dir)
+    if resume and resume_point not in ["refinement", "summary", "preprocessing", "translation"]:
+        print("\nStep 4: Skipping translation (already completed)")
+        # Load translated segments
+        translated_file = output_path / "08_translated_segments.json"
+        with open(translated_file, 'r', encoding='utf-8') as f:
+            translated_segments = json.load(f)
+    else:
+        print("\nStep 4: Translating segments...")
+        update_step_status(state, "translation", "running")
+        save_state(state, output_dir)
+
+        # Pass state to batch_translate for batch-level tracking
+        translated_segments = batch_translate(translation_segments, summary, output_dir, state)
+
+        update_step_status(state, "translation", "completed",
+                          total_segments=len(translation_segments),
+                          translated_segments=len([s for s in translated_segments if 'zh' in s and s['zh']]))
+        save_state(state, output_dir)
 
     # Step 5: Merge translations back to refined segments
-    print("Step 5: Merging translations back to refined segments...")
-    final_segments = merge_translations_back_to_segments(regenerated_segments, translated_segments)
+    if resume and resume_point not in ["refinement", "summary", "preprocessing", "translation", "merging"]:
+        print("\nStep 5: Skipping merging (already completed)")
+        # Load final transcript
+        final_file = output_path / "11_final_translated_transcript.json"
+        with open(final_file, 'r', encoding='utf-8') as f:
+            final_transcript = json.load(f)
+        final_segments = final_transcript['segments']
+    else:
+        print("\nStep 5: Merging translations back to refined segments...")
+        update_step_status(state, "merging", "running")
+        save_state(state, output_dir)
 
-    # Create final transcript
-    final_transcript = refined_transcript.copy()
-    final_transcript['segments'] = final_segments
-    final_transcript['text'] = regenerate_full_transcript_text(final_segments)
+        final_segments = merge_translations_back_to_segments(regenerated_segments, translated_segments)
 
-    # Save final transcript
-    final_file = output_path / "11_final_translated_transcript.json"
-    with open(final_file, 'w', encoding='utf-8') as f:
-        json.dump(final_transcript, f, ensure_ascii=False, indent=2)
-    print(f"Final translated transcript saved to: {final_file}")
+        # Create final transcript
+        final_transcript = refined_transcript.copy()
+        final_transcript['segments'] = final_segments
+        final_transcript['text'] = regenerate_full_transcript_text(final_segments)
+
+        # Save final transcript
+        final_file = output_path / "11_final_translated_transcript.json"
+        with open(final_file, 'w', encoding='utf-8') as f:
+            json.dump(final_transcript, f, ensure_ascii=False, indent=2)
+        print(f"Final translated transcript saved to: {final_file}")
+
+        update_step_status(state, "merging", "completed",
+                          merged_segments=len(final_segments))
+        save_state(state, output_dir)
+
+    # Final step: Mark pipeline as completed
+    update_step_status(state, "final_output", "running")
+    save_state(state, output_dir)
 
     print(f"\n=== PIPELINE COMPLETE ===")
     print(f"Final transcript with {len(final_transcript.get('segments', []))} segments")
@@ -993,8 +1358,11 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         f.write("4. Merging Translations\n\n")
 
         f.write("Refinement Statistics:\n")
-        for key, value in stats.items():
-            f.write(f"  - {key.replace('_', ' ').title()}: {value}\n")
+        if stats:
+            for key, value in stats.items():
+                f.write(f"  - {key.replace('_', ' ').title()}: {value}\n")
+        else:
+            f.write("  - No refinement statistics available\n")
 
         f.write(f"\nFinal Output:\n")
         f.write(f"  - Total refined segments: {len(final_segments)}\n")
@@ -1003,5 +1371,17 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         f.write(f"  - Final transcript file: 11_final_translated_transcript.json\n")
 
     print(f"Pipeline summary saved to: {pipeline_summary_file}")
+
+    # Mark pipeline as completed
+    state["pipeline_info"]["status"] = "completed"
+    state["pipeline_info"]["end_time"] = datetime.now().isoformat()
+    update_step_status(state, "final_output", "completed",
+                      total_segments=len(final_segments),
+                      segments_with_translations=segments_with_zh,
+                      translation_coverage=segments_with_zh/len(final_segments)*100)
+    save_state(state, output_dir)
+
+    print(f"✅ Pipeline {state['pipeline_info']['pipeline_id']} completed successfully!")
+    print(f"State saved to: {output_path / 'state.json'}")
 
     return final_transcript
