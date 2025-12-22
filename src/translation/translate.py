@@ -35,10 +35,10 @@ def save_state(state: Dict[str, Any], output_dir: str):
     with open(state_file, 'w', encoding='utf-8') as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def create_initial_state(whisper_transcript: str, output_dir: str) -> Dict[str, Any]:
+def create_initial_state(whisper_transcript: str, output_dir: str, url: str = None, downloaded_file: str = None, video_title: str = None) -> Dict[str, Any]:
     """Create initial state structure for a new translation pipeline"""
     import uuid
-    return {
+    state = {
         "pipeline_info": {
             "pipeline_id": f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
             "start_time": datetime.now().isoformat(),
@@ -67,6 +67,63 @@ def create_initial_state(whisper_transcript: str, output_dir: str) -> Dict[str, 
             "final_output": {"status": "pending"}
         }
     }
+
+    # Add download info if URL is provided
+    if url:
+        state["download_info"] = {
+            "url": url,
+            "downloaded_file": downloaded_file,
+            "video_title": video_title,
+            "download_completed": bool(downloaded_file),
+            "download_time": datetime.now().isoformat() if downloaded_file else None
+        }
+        state["steps"]["download"] = {
+            "status": "completed" if downloaded_file else "pending",
+            "url": url,
+            "start_time": datetime.now().isoformat(),
+            "end_time": datetime.now().isoformat() if downloaded_file else None
+        }
+        if downloaded_file and "download" not in state["completed_steps"]:
+            state["completed_steps"].append("download")
+
+    return state
+
+def update_download_status(state: Dict[str, Any], url: str, status: str, downloaded_file: str = None, video_title: str = None, **kwargs):
+    """Update download status in state"""
+    if "download_info" not in state:
+        state["download_info"] = {
+            "url": url,
+            "downloaded_file": None,
+            "video_title": None,
+            "download_completed": False,
+            "download_time": None
+        }
+
+    if "download" not in state["steps"]:
+        state["steps"]["download"] = {
+            "status": "pending",
+            "url": url
+        }
+
+    # Update download_info
+    state["download_info"].update({
+        "url": url,
+        "downloaded_file": downloaded_file,
+        "video_title": video_title,
+        "download_completed": status == "completed"
+    })
+
+    if status == "completed":
+        state["download_info"]["download_time"] = datetime.now().isoformat()
+
+    # Update step status
+    update_step_status(state, "download", status, **kwargs)
+
+    # Add download-specific info to step
+    if downloaded_file:
+        state["steps"]["download"]["downloaded_file"] = downloaded_file
+    if video_title:
+        state["steps"]["download"]["video_title"] = video_title
 
 def update_step_status(state: Dict[str, Any], step_name: str, status: str, **kwargs):
     """Update status of a pipeline step"""
@@ -1105,7 +1162,10 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
 
 def translation_pipeline(whisper_transcript: Dict[str, Any],
                         output_dir: Optional[str] = None,
-                        resume: bool = False) -> Dict[str, Any]:
+                        resume: bool = False,
+                        url: str = None,
+                        downloaded_file: str = None,
+                        video_title: str = None) -> Dict[str, Any]:
     """
     Complete pipeline from Whisper transcription to translated transcript.
 
@@ -1135,7 +1195,7 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         state = load_state(output_dir)
         if state is None:
             print("No existing state found, starting fresh pipeline")
-            state = create_initial_state("whisper_transcript", output_dir)
+            state = create_initial_state("whisper_transcript", output_dir, url, downloaded_file, video_title)
         else:
             print(f"Resuming pipeline from state: {state['pipeline_info']['pipeline_id']}")
             print(f"Status: {state['pipeline_info']['status']}")
@@ -1156,7 +1216,7 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
                     with open(final_file, 'r', encoding='utf-8') as f:
                         return json.load(f)
     else:
-        state = create_initial_state("whisper_transcript", output_dir)
+        state = create_initial_state("whisper_transcript", output_dir, url, downloaded_file, video_title)
 
     print("=== TRANSLATION PIPELINE ===")
     print(f"Pipeline ID: {state['pipeline_info']['pipeline_id']}")

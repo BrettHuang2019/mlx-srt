@@ -50,15 +50,19 @@ from ingestion.download_from_url import is_url, download_video_from_url
 from transcription.whisper_transcriber import transcribe_audio
 from translation.translate import translation_pipeline
 from subtitle.generate_srt import generate_srt_from_segments
+from task_manager import check_system_resources
 
 
-def process_audio_file(audio_path: str, output_dir: str, resume: bool = False) -> Dict[str, Any]:
+def process_audio_file(audio_path: str, output_dir: str, resume: bool = False, url: str = None, downloaded_file: str = None, video_title: str = None) -> Dict[str, Any]:
     """Process audio file through transcription and translation pipeline.
 
     Args:
         audio_path: Path to audio file
         output_dir: Directory to save intermediate and final files
         resume: Whether to resume from last checkpoint
+        url: Original URL (optional, for state tracking)
+        downloaded_file: Path to downloaded file (optional, for state tracking)
+        video_title: Video title (optional, for state tracking)
 
     Returns:
         Translated transcript with Chinese translations
@@ -89,7 +93,7 @@ def process_audio_file(audio_path: str, output_dir: str, resume: bool = False) -
 
     # Step 2: Translation pipeline
     print(f"\nStep 2: Running translation pipeline...")
-    translated_transcript = translation_pipeline(whisper_result, output_dir, resume)
+    translated_transcript = translation_pipeline(whisper_result, output_dir, resume, url, downloaded_file, video_title)
 
     return translated_transcript
 
@@ -111,47 +115,62 @@ def process_url(url: str, output_dir: str, resume: bool = False) -> Tuple[str, D
     print(f"URL: {url}")
     print(f"Output: {output_dir}")
 
-    # Step 1: Download video from URL to downloads folder (skip if resuming and video already exists)
+    # Step 1: Check if download was already completed in previous run
     downloaded_video_path = None
+    video_title = None
 
-    # Always check downloads folder for existing videos
-    project_root = Path(__file__).parent.parent.parent  # Go up from src/ to project root
-    downloads_dir = project_root / "downloads"
+    if resume:
+        state_file = Path(output_dir) / "state.json"
+        if state_file.exists():
+            try:
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
 
-    if downloads_dir.exists():
-        existing_videos = [
-            f for f in downloads_dir.glob("*")
-            if f.is_file() and f.suffix.lower() in {'.mp4', '.mkv', '.webm', '.avi', '.mov'}
-        ]
+                # Check if download was completed
+                if (state.get("download_info", {}).get("download_completed") and
+                    state.get("download_info", {}).get("url") == url):
+                    downloaded_file = state.get("download_info", {}).get("downloaded_file")
+                    video_title = state.get("download_info", {}).get("video_title")
 
-        if existing_videos and resume:
-            # Use the most recently modified video file
-            downloaded_video_path = str(max(existing_videos, key=lambda x: x.stat().st_mtime))
-            print(f"\nStep 1: Using existing downloaded video...")
-            print(f"Video file: {downloaded_video_path}")
+                    if downloaded_file and Path(downloaded_file).exists():
+                        downloaded_video_path = downloaded_file
+                        print(f"\nStep 1: Resuming from completed download...")
+                        print(f"URL: {url}")
+                        print(f"Video file: {downloaded_video_path}")
+                        print(f"Video title: {video_title}")
+                    else:
+                        print(f"\n⚠️  Download state found but file missing: {downloaded_file}")
+                        print(f"Will re-download the video...")
+            except Exception as e:
+                print(f"\n⚠️  Could not load download state: {e}")
+                print(f"Will proceed with fresh download...")
 
+    # If no completed download found, download the video
     if not downloaded_video_path:
         print(f"\nStep 1: Downloading video from URL...")
         try:
-            # Download to downloads folder (no output_path parameter needed)
-            downloaded_video_path, video_title = download_video_from_url(url)
+            # Download to downloads folder and save state to output_dir
+            downloaded_video_path, video_title = download_video_from_url(url, output_dir=output_dir)
             print(f"Video downloaded to: {downloaded_video_path}")
         except Exception as e:
             raise RuntimeError(f"Failed to download video from URL: {e}")
 
     # Step 2: Process downloaded video through the same pipeline
-    translated_transcript = process_video_file(downloaded_video_path, output_dir, resume)
+    translated_transcript = process_video_file(downloaded_video_path, output_dir, resume, url, downloaded_video_path, video_title)
 
     return downloaded_video_path, translated_transcript
 
 
-def process_video_file(video_path: str, output_dir: str, resume: bool = False) -> Dict[str, Any]:
+def process_video_file(video_path: str, output_dir: str, resume: bool = False, url: str = None, downloaded_file: str = None, video_title: str = None) -> Dict[str, Any]:
     """Process video file through audio extraction, transcription, and translation.
 
     Args:
         video_path: Path to video file
         output_dir: Directory to save intermediate and final files
         resume: Whether to resume from last checkpoint
+        url: Original URL (optional, for state tracking)
+        downloaded_file: Path to downloaded file (optional, for state tracking)
+        video_title: Video title (optional, for state tracking)
 
     Returns:
         Translated transcript with Chinese translations
@@ -179,7 +198,7 @@ def process_video_file(video_path: str, output_dir: str, resume: bool = False) -
         print(f"Audio extracted: {extracted_audio_path}")
 
     # Step 2: Process extracted audio through the same pipeline
-    return process_audio_file(str(extracted_audio_path), output_dir, resume)
+    return process_audio_file(str(extracted_audio_path), output_dir, resume, url, downloaded_file, video_title)
 
 
 def generate_srt_file(translated_transcript: Dict[str, Any], output_path: str) -> None:
@@ -284,6 +303,11 @@ Examples:
 
     args = parser.parse_args()
 
+    # System resource checks (RAM and running tasks)
+    if not check_system_resources():
+        print("\n❌ Cannot start task due to insufficient resources or conflicting tasks.")
+        sys.exit(1)
+
     # Check if input is a URL
     input_is_url = is_url(args.input_file)
 
@@ -300,11 +324,11 @@ Examples:
                 safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in (' ', '-', '_')).rstrip()
                 safe_title = safe_title.replace(' ', '_')[:50]  # Limit length
                 # Place output folder inside downloads directory
-                project_root = Path(__file__).parent.parent.parent
+                project_root = Path(__file__).parent.parent
                 output_dir = project_root / "downloads" / f"{safe_title}_output"
             except:
                 # Fallback if we can't get video info
-                project_root = Path(__file__).parent.parent.parent
+                project_root = Path(__file__).parent.parent
                 output_dir = project_root / "downloads" / "downloaded_video_output"
         else:
             # Default to input filename + "_output"
@@ -384,18 +408,23 @@ Examples:
                 srt_path = args.srt_output
             else:
                 if input_is_url:
-                    # For URLs, save SRT in downloads folder alongside video
-                    from ingestion.download_from_url import get_video_info
-                    try:
-                        video_info = get_video_info(args.input_file)
-                        safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                        safe_title = safe_title.replace(' ', '_')[:50]  # Limit length
-                        project_root = Path(__file__).parent.parent.parent  # Go up from src/ to project root
-                        srt_path = project_root / "downloads" / f"{safe_title}.srt"
-                    except:
-                        # Fallback if we can't get video info
-                        project_root = Path(__file__).parent.parent.parent
-                        srt_path = project_root / "downloads" / "downloaded_video.srt"
+                    # For URLs, save SRT in downloads folder with same name as video file
+                    project_root = Path(__file__).parent.parent  # Go up from src/ to project root
+                    downloads_dir = project_root / "downloads"
+
+                    # Find the downloaded video file
+                    video_files = [
+                        f for f in downloads_dir.glob("*")
+                        if f.is_file() and f.suffix.lower() in {'.mp4', '.mkv', '.webm', '.avi', '.mov'}
+                    ]
+
+                    if video_files:
+                        # Use the most recently modified video file
+                        video_file = max(video_files, key=lambda x: x.stat().st_mtime)
+                        srt_path = video_file.with_suffix('.srt')
+                    else:
+                        # Fallback if no video file found
+                        srt_path = downloads_dir / "downloaded_video.srt"
                 else:
                     # Default to same folder as input file
                     srt_path = input_path.parent / f"{input_path.stem}.srt"
@@ -433,8 +462,8 @@ Examples:
             print(f"  - Segments with Chinese translation: {segments_with_zh}")
             print(f"  - Translation coverage: {segments_with_zh/len(segments)*100:.1f}%")
 
-        # Clean up output directory unless --keep-artifacts is specified or it's a URL (we keep URL artifacts)
-        should_keep_artifacts = args.keep_artifacts or input_is_url
+        # Clean up output directory unless --keep-artifacts is specified
+        should_keep_artifacts = args.keep_artifacts
 
         if not should_keep_artifacts and output_dir.exists():
             try:
@@ -444,12 +473,8 @@ Examples:
             except Exception as cleanup_error:
                 print(f"\n⚠️  Warning: Could not clean up output directory: {cleanup_error}")
         elif should_keep_artifacts:
-            if input_is_url:
-                print(f"\n📁 Kept artifacts for URL processing in downloads folder: {output_dir}")
-                print(f"   Video files and SRT files are also in downloads/ folder")
-            else:
-                print(f"\n📁 Kept artifacts in output directory: {output_dir}")
-                print(f"   Use --keep-artifacts option to preserve them for debugging")
+            print(f"\n📁 Kept artifacts in output directory: {output_dir}")
+            print(f"   Use --keep-artifacts option to preserve them for debugging")
 
     except Exception as e:
         print(f"Error: {e}")

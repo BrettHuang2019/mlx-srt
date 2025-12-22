@@ -72,6 +72,10 @@ def refine_segments(whisper_output: Dict[str, Any], output_dir: str = None) -> D
     cleaned_segments, repetitive_removed = _remove_repetitive_patterns(filtered_segments)
     stats["repetitive_patterns_removed"] = repetitive_removed
 
+    # Step 7.5: Remove repeated character-level patterns
+    cleaned_segments, char_patterns_removed = _remove_repeated_char_patterns(cleaned_segments)
+    stats["repetitive_patterns_removed"] += char_patterns_removed
+
     # Step 8: Merge fragmented sentences
     merged_segments, merge_count, merge_details = _merge_fragments(cleaned_segments)
     stats["segments_merged"] = merge_count
@@ -313,6 +317,38 @@ def _remove_repetitive_patterns(segments: List[Dict[str, Any]]) -> Tuple[List[Di
             repetitive_removed += 1
 
     return cleaned_segments, repetitive_removed
+
+
+def _remove_repeated_char_patterns(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Remove segments with repeated character-level patterns (2-15 chars repeated 5+ times)."""
+    cleaned_segments = []
+    removed_count = 0
+
+    for segment in segments:
+        text = segment.get("text", "")
+
+        # Check for repetitive patterns: 2-15 char patterns repeated 5+ times
+        if re.search(r'(.{2,15}?)(?:\1){4,}', text):
+            # Remove the repetitive pattern
+            cleaned_text = re.sub(r'(.{2,15}?)(?:\1){4,}', '', text)
+            # Clean up any leftover whitespace/punctuation
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+
+            # If block is empty after removal, skip this segment
+            if not cleaned_text:
+                removed_count += 1
+                print(f"Removed empty segment after pattern removal")
+                continue
+
+            # Otherwise, update the segment with cleaned text
+            segment_copy = segment.copy()
+            segment_copy["text"] = cleaned_text
+            cleaned_segments.append(segment_copy)
+            removed_count += 1
+        else:
+            cleaned_segments.append(segment)
+
+    return cleaned_segments, removed_count
 
 
 def _remove_punctuation_only_segments(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:

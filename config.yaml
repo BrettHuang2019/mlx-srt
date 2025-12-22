@@ -3,6 +3,11 @@ whisper:
   initial_prompt: null
   language: "french"
 
+system:
+  min_ram_gb: 4
+  task_check_interval: 60
+  max_wait_time_minutes: 30
+
 translation:
   model_path: "mlx-community/Qwen2.5-7B-Instruct-4bit"
   batch_size: 20
