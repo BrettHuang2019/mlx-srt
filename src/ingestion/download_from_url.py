@@ -116,14 +116,14 @@ def download_video_from_url(
         'progress_hooks': [progress_hook],
     }
 
-    # Note: For authentication, yt-dlp can use browser cookies automatically
-    # You can export browser cookies using a browser extension like "Get cookies.txt LOCALLY"
-    # For now, we'll proceed without explicit cookie handling to avoid SQLite encoding issues
-    chrome_cookies = find_chrome_cookies()
-    if chrome_cookies:
-        print("🍪 Chrome cookies found - some content may require manual cookie export for authentication")
-    else:
-        print("ℹ️  No Chrome cookies found - proceeding without authentication")
+    # Use Chrome cookies for authentication
+    if use_cookies:
+        chrome_cookies = find_chrome_cookies()
+        if chrome_cookies:
+            ydl_opts['cookiesfrombrowser'] = ('chrome',)
+            print("🍪 Using Chrome cookies for authentication")
+        else:
+            print("ℹ️  No Chrome cookies found - proceeding without authentication")
 
     # Download video
     try:
@@ -362,6 +362,8 @@ def save_download_state(url: str, downloaded_file: str = None, video_title: str 
             state["completed_steps"].append("download")
     elif status == "failed":
         state["steps"]["download"]["error"] = error
+        state["pipeline_info"]["status"] = "failed"
+        state["pipeline_info"]["end_time"] = datetime.now().isoformat()
 
     state["pipeline_info"]["last_checkpoint"] = datetime.now().isoformat()
 

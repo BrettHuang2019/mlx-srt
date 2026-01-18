@@ -41,6 +41,7 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
+from datetime import datetime
 
 # Add src to path for imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -84,16 +85,50 @@ def process_audio_file(audio_path: str, output_dir: str, resume: bool = False, u
         print(f"Transcription loaded: {transcription_file}")
     else:
         print(f"\nStep 1: Transcribing audio...")
-        whisper_result = transcribe_audio(audio_path)
+        try:
+            whisper_result = transcribe_audio(audio_path)
 
-        # Save transcription
-        with open(transcription_file, 'w', encoding='utf-8') as f:
-            json.dump(whisper_result, f, ensure_ascii=False, indent=2)
-        print(f"Transcription saved: {transcription_file}")
+            # Save transcription
+            with open(transcription_file, 'w', encoding='utf-8') as f:
+                json.dump(whisper_result, f, ensure_ascii=False, indent=2)
+            print(f"Transcription saved: {transcription_file}")
+        except Exception as e:
+            # Mark pipeline as failed
+            state_file = Path(output_dir) / "state.json"
+            if state_file.exists():
+                try:
+                    with open(state_file, 'r', encoding='utf-8') as f:
+                        state = json.load(f)
+                    state["pipeline_info"]["status"] = "failed"
+                    state["pipeline_info"]["end_time"] = datetime.now().isoformat()
+                    state["pipeline_info"]["error"] = f"Transcription failed: {e}"
+                    with open(state_file, 'w', encoding='utf-8') as f:
+                        json.dump(state, f, ensure_ascii=False, indent=2)
+                    print(f"💾 Pipeline status updated to 'failed' in: {state_file}")
+                except:
+                    pass
+            raise RuntimeError(f"Transcription failed: {e}")
 
     # Step 2: Translation pipeline
     print(f"\nStep 2: Running translation pipeline...")
-    translated_transcript = translation_pipeline(whisper_result, output_dir, resume, url, downloaded_file, video_title)
+    try:
+        translated_transcript = translation_pipeline(whisper_result, output_dir, resume, url, downloaded_file, video_title)
+    except Exception as e:
+        # Mark pipeline as failed
+        state_file = Path(output_dir) / "state.json"
+        if state_file.exists():
+            try:
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                state["pipeline_info"]["status"] = "failed"
+                state["pipeline_info"]["end_time"] = datetime.now().isoformat()
+                state["pipeline_info"]["error"] = str(e)
+                with open(state_file, 'w', encoding='utf-8') as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+                print(f"💾 Pipeline status updated to 'failed' in: {state_file}")
+            except:
+                pass
+        raise RuntimeError(f"Translation pipeline failed: {e}")
 
     return translated_transcript
 
@@ -189,13 +224,30 @@ def process_video_file(video_path: str, output_dir: str, resume: bool = False, u
         print(f"Audio file: {extracted_audio_path}")
     else:
         print(f"\nStep 1: Extracting audio from video...")
-        extract_audio(video_path, str(extracted_audio_path))
+        try:
+            extract_audio(video_path, str(extracted_audio_path))
 
-        # Verify audio extraction
-        if not extracted_audio_path.exists():
-            raise RuntimeError(f"Audio extraction failed: {extracted_audio_path}")
+            # Verify audio extraction
+            if not extracted_audio_path.exists():
+                raise RuntimeError(f"Audio extraction failed: {extracted_audio_path}")
 
-        print(f"Audio extracted: {extracted_audio_path}")
+            print(f"Audio extracted: {extracted_audio_path}")
+        except Exception as e:
+            # Mark pipeline as failed
+            state_file = Path(output_dir) / "state.json"
+            if state_file.exists():
+                try:
+                    with open(state_file, 'r', encoding='utf-8') as f:
+                        state = json.load(f)
+                    state["pipeline_info"]["status"] = "failed"
+                    state["pipeline_info"]["end_time"] = datetime.now().isoformat()
+                    state["pipeline_info"]["error"] = f"Audio extraction failed: {e}"
+                    with open(state_file, 'w', encoding='utf-8') as f:
+                        json.dump(state, f, ensure_ascii=False, indent=2)
+                    print(f"💾 Pipeline status updated to 'failed' in: {state_file}")
+                except:
+                    pass
+            raise RuntimeError(f"Audio extraction failed: {e}")
 
     # Step 2: Process extracted audio through the same pipeline
     return process_audio_file(str(extracted_audio_path), output_dir, resume, url, downloaded_file, video_title)

@@ -527,12 +527,50 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
 
     return summary
 
+def sanitize_model_output(output: str) -> str:
+    """Sanitize model output by removing smart quotes that break JSON parsing."""
+    # Remove specific Unicode quote characters that confuse the JSON parser
+    # Keep all other Chinese punctuation for readability
+    quote_chars = [
+        '\u2018',  # '
+        '\u2019',  # '
+        '\u201b',  # '
+        '\u201c',  # "
+        '\u201d',  # "
+        '\u201f',  # "
+        '\u00ab',  # «
+        '\u00bb',  # »
+        '\u2039',  # ‹
+        '\u203a',  # ›
+        '\u300c',  # 「
+        '\u300d',  # 」
+        '\u300e',  # 『
+        '\u300f',  # 』
+        '\u2014',  # —
+        '\u2013',  # –
+        '\u2026',  # …
+    ]
+    for char in quote_chars:
+        output = output.replace(char, '')
+
+    # Fix common JSON structure mistakes made by the model
+    # The model sometimes forgets the closing quote for string values
+    # Pattern: "...value'}]" should become "...value"}]"
+    output = output.replace("'}]", "\"}]")
+    # Pattern: "...value'}" should become "...value"}"  (for single items)
+    output = output.replace("'}", "\"}")
+
+    return output
+
 def validate_and_parse_batch_response(response: str, batch_segments: List[Dict[str, Any]],
                                     batch_num: int) -> List[Dict[str, Any]]:
     """
     Validate and parse LLM response for a batch.
     Raises ValueError for validation failures (Error Types 3-6).
     """
+    # Sanitize response to handle smart quotes and other Unicode issues
+    response = sanitize_model_output(response)
+
     # Error Type 3: JSON Parsing Errors
     try:
         batch_translated = json.loads(response)
