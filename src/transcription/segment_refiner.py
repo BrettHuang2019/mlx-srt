@@ -196,7 +196,20 @@ def _split_long_blocks(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, A
 
     for segment in segments:
         text = segment.get("text", "").strip()
-        sentences = re.split(r'([.!?])\s*', text)
+
+        # Check if text starts with » (continuation from previous subtitle)
+        # If so, preserve it as a prefix and don't split on the first »
+        starts_with_quote_end = text.startswith("»")
+        if starts_with_quote_end:
+            # Remove the leading » for splitting, will add back later
+            text_without_leading_quote = text[1:].strip()
+            # Split on sentence-ending punctuation and » (but not the leading one)
+            sentences = re.split(r'([.!?»])\s*', text_without_leading_quote)
+        else:
+            sentences = re.split(r'([.!?»])\s*', text)
+
+        # Track if we have » delimiters (before filtering)
+        has_quote_delimiters = "»" in sentences
 
         # Reconstruct sentences with punctuation
         reconstructed_sentences = []
@@ -204,11 +217,25 @@ def _split_long_blocks(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, A
             if i + 1 < len(sentences):
                 sentence = sentences[i] + sentences[i + 1]
                 if sentence.strip():
-                    reconstructed_sentences.append(sentence.strip())
+                    # Check if this is a standalone »
+                    if sentence.strip() == "»":
+                        # Append to previous sentence
+                        if reconstructed_sentences:
+                            reconstructed_sentences[-1] += " »"
+                    else:
+                        reconstructed_sentences.append(sentence.strip())
 
-        # Check if we need to split (multiple long sentences)
-        if (len(reconstructed_sentences) > 1 and
-            all(len(sentence.split()) > 5 for sentence in reconstructed_sentences)):
+        # Add back the leading » if it was removed
+        if starts_with_quote_end and reconstructed_sentences:
+            reconstructed_sentences[0] = "» " + reconstructed_sentences[0]
+
+        # Check if we need to split
+        # Split if: multiple sentences AND (all are >5 words OR we have » delimiters for avoiding long translations)
+        should_split = (len(reconstructed_sentences) > 1 and
+                        (all(len(sentence.split()) > 5 for sentence in reconstructed_sentences) or
+                         (has_quote_delimiters and len(reconstructed_sentences) > 2)))
+
+        if should_split:
 
             # Split into multiple segments
             total_duration = segment["end"] - segment["start"]
