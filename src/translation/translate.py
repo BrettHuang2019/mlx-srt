@@ -410,13 +410,59 @@ def load_config() -> Dict[str, Any]:
     with open('config.yaml', 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
+
+def get_summary_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return summary config, supporting both nested and legacy flat keys."""
+    translation_config = config.get('translation', {})
+    summary_config = translation_config.get('summary', {}).copy()
+
+    if 'model_path' not in summary_config:
+        summary_config['model_path'] = translation_config.get(
+            'summary_model_path',
+            translation_config.get('model_path', 'mlx-community/Qwen3.5-4B-4bit')
+        )
+    if 'prompt' not in summary_config:
+        summary_config['prompt'] = translation_config.get(
+            'summary_prompt',
+            '用中文简短总结以下内容(150字以内)： {text}'
+        )
+    if 'verbose' not in summary_config:
+        summary_config['verbose'] = translation_config.get('verbose', False)
+    if 'enable_thinking' not in summary_config:
+        summary_config['enable_thinking'] = translation_config.get('summary_enable_thinking', False)
+
+    return summary_config
+
+
+def get_translation_step_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return translation-step config, supporting both nested and legacy flat keys."""
+    translation_config = config.get('translation', {})
+    step_config = translation_config.get('translate', {}).copy()
+
+    legacy_defaults = {
+        'model_path': 'mlx-community/Qwen2.5-7B-Instruct-4bit',
+        'batch_size': 10,
+        'max_tokens': 2048,
+        'temperature': 0.1,
+        'translation_prompt': '',
+        'verbose': False,
+        'max_retries': 3,
+        'retry_delay': 1.0,
+    }
+
+    for key, default in legacy_defaults.items():
+        if key not in step_config:
+            step_config[key] = translation_config.get(key, default)
+
+    return step_config
+
 def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
     """
     Generate summary of transcript text.
     Takes refined transcript JSON and generates 150-200 words summary.
     """
     config = load_config()
-    translation_config = config.get('translation', {})
+    summary_config = get_summary_config(config)
 
     # Load transcript
     with open(transcript_file, 'r', encoding='utf-8') as f:
@@ -450,21 +496,24 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
     if load and generate:
         try:
             # Load model
-            model_path = translation_config.get('model_path', 'mlx-community/Qwen2.5-7B-Instruct-4bit')
+            model_path = summary_config.get('model_path', 'mlx-community/Qwen3.5-4B-4bit')
             model, tokenizer = load(model_path)
 
             # Generate summary
-            summary_prompt = translation_config.get('summary_prompt',
-                                                 '用150字左右总结以下文稿: {text}')
+            summary_prompt = summary_config.get('prompt',
+                                                '用中文简短总结以下内容(150字以内)： {text}')
             prompt = summary_prompt.replace("{text}", full_text)
 
             messages = [{"role": "user", "content": prompt}]
+            chat_template_kwargs = {"add_generation_prompt": True}
+            if "enable_thinking" in summary_config:
+                chat_template_kwargs["enable_thinking"] = summary_config["enable_thinking"]
             formatted_prompt = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True
+                messages, **chat_template_kwargs
             )
 
             summary = generate(model, tokenizer, prompt=formatted_prompt,
-                            verbose=translation_config.get('verbose', False))
+                            verbose=summary_config.get('verbose', False))
 
         except Exception as e:
             print(f"Warning: Could not generate summary with MLX-LM: {e}")
@@ -486,7 +535,7 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
 
             # Model information
             if load and generate:
-                model_path = translation_config.get('model_path', 'mlx-community/Qwen2.5-7B-Instruct-4bit')
+                model_path = summary_config.get('model_path', 'mlx-community/Qwen3.5-4B-4bit')
                 f.write(f"Model Used: {model_path}\n")
                 f.write("Status: MLX-LM model loaded successfully\n")
             else:
@@ -790,7 +839,7 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
     Requires MLX-LM to be available.
     """
     config = load_config()
-    translation_config = config.get('translation', {})
+    translation_config = get_translation_step_config(config)
 
     # Extract configuration parameters
     model_path = translation_config.get('model_path', 'mlx-community/Qwen2.5-7B-Instruct-4bit')

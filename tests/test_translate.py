@@ -20,9 +20,11 @@ from translation.translate import (
     summarize,
     batch_translate,
     translate_transcript,
+    get_summary_config,
     load_config,
     translation_pipeline
 )
+import translation.translate as translate_module
 
 # ==========================================
 # TRANSLATION PREPROCESSING TESTS
@@ -74,6 +76,67 @@ def test_summary_length_scales_with_transcript_length():
     # Verify output file was created
     assert os.path.exists(output_file)
     print(f"Summary test output saved to: {output_file}")
+
+
+def test_summary_disables_thinking_for_qwen_template(monkeypatch, tmp_path):
+    transcript_file = tmp_path / "transcript.json"
+    transcript_file.write_text(
+        json.dumps({"text": "Bonjour le monde", "segments": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            captured["messages"] = messages
+            captured["kwargs"] = kwargs
+            return "formatted-prompt"
+
+    fake_tokenizer = FakeTokenizer()
+
+    def fake_load(model_path):
+        captured["model_path"] = model_path
+        return object(), fake_tokenizer
+
+    def fake_generate(model, tokenizer, prompt, verbose=False, **kwargs):
+        captured["generate"] = {
+            "prompt": prompt,
+            "verbose": verbose,
+            "kwargs": kwargs,
+        }
+        return "简短总结"
+
+    monkeypatch.setattr(translate_module, "load", fake_load)
+    monkeypatch.setattr(translate_module, "generate", fake_generate)
+    monkeypatch.setattr(
+        translate_module,
+        "load_config",
+        lambda: {
+            "translation": {
+                "summary": {
+                    "model_path": "mlx-community/Qwen3.5-4B-4bit",
+                    "prompt": "总结：{text}",
+                    "enable_thinking": False,
+                    "verbose": False,
+                }
+            }
+        },
+    )
+
+    summary = summarize(str(transcript_file), str(tmp_path))
+
+    assert summary == "简短总结"
+    assert captured["model_path"] == "mlx-community/Qwen3.5-4B-4bit"
+    assert captured["kwargs"]["add_generation_prompt"] is True
+    assert captured["kwargs"]["enable_thinking"] is False
+    assert captured["generate"]["prompt"] == "formatted-prompt"
+
+
+def test_get_summary_config_defaults_thinking_off():
+    summary_config = get_summary_config({"translation": {}})
+
+    assert summary_config["enable_thinking"] is False
 
 
 def test_convert_segments_to_translation_format():
@@ -253,8 +316,9 @@ def test_comprehensive_llm_translation():
         from translation.translate import load_config
         config = load_config()
         translation_config = config.get('translation', {})
-        batch_size = translation_config.get('batch_size', 10)
-        model_path = translation_config.get('model_path', 'N/A')
+        translate_config = translation_config.get('translate', {})
+        batch_size = translate_config.get('batch_size', translation_config.get('batch_size', 10))
+        model_path = translate_config.get('model_path', translation_config.get('model_path', 'N/A'))
     except:
         batch_size = 10
         model_path = 'N/A'

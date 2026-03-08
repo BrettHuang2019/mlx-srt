@@ -6,7 +6,7 @@ set -euo pipefail
 # ---- config ----
 OSASCRIPT="/usr/bin/osascript"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_PY="$SCRIPT_DIR/venv/bin/python"
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
 MAIN_PY="$SCRIPT_DIR/src/main.py"
 DEBUG_LOG="$HOME/mlx-srt-debug.log"
 AUTO_LOG="$SCRIPT_DIR/mlx-srt-automator-debug.log"

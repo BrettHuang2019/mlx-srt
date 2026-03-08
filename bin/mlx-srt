@@ -1,0 +1,24 @@
+#!/bin/bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+MAIN_PY="$PROJECT_ROOT/src/main.py"
+
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Error: Python environment not found at $PYTHON_BIN" >&2
+  echo "Create it first, for example:" >&2
+  echo "  cd $PROJECT_ROOT && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+cd "$PROJECT_ROOT"
+exec "$PYTHON_BIN" "$MAIN_PY" "$@"

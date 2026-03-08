@@ -4,50 +4,54 @@ whisper:
   language: "french"
 
 system:
-  min_ram_gb: 4
+  min_ram_gb: 3
   task_check_interval: 60
   max_wait_time_minutes: 30
 
 translation:
-  model_path: "mlx-community/Qwen2.5-7B-Instruct-4bit"
-  batch_size: 20
-  max_tokens: 2048
-  temperature: 0.5
-  max_retries: 1
-  retry_delay: 1.0
-  summary_prompt: "用中文简短总结以下内容(150字以内)： {text}"
-  translation_prompt: |
-    你是一名专业法语字幕译员，任务是将法语字幕翻译成准确、贴近原句结构的中文，用于语言学习。
+  summary:
+    model_path: "mlx-community/Qwen3.5-4B-4bit"
+    prompt: "用中文简短总结以下内容(150字以内)： {text}"
+    enable_thinking: false
+    verbose: true
+  translate:
+    model_path: "mlx-community/HY-MT1.5-1.8B-8bit"
+    batch_size: 20
+    max_tokens: 2048
+    temperature: 0.5
+    max_retries: 1
+    retry_delay: 1.0
+    translation_prompt: |
+      你是一名专业法语字幕译员，任务是将法语字幕翻译成准确、贴近原句结构的中文，用于语言学习。
 
-    翻译规则：
+      翻译规则：
 
-    1. 只输出 JSON 数组，格式严格如下：
-      [{"index": 1, "zh": "翻译内容"}, ...]
+      1. 只输出 JSON 数组，格式严格如下：
+        [{"index": 1, "zh": "翻译内容"}, ...]
 
-    2. 必须保留并按顺序输出所有index： 每一条输出的 index 必须原样复制自输入字幕； 注意: 输出条目与 原字幕 必须一一对应，禁止跳过、重复或错位；
+      2. 必须保留并按顺序输出所有index： 每一条输出的 index 必须原样复制自输入字幕； 注意: 输出条目与 原字幕 必须一一对应，禁止跳过、重复或错位；
 
 
 
-    翻译要求：
+      翻译要求：
 
-    1. 尽量直译，保持原句逻辑和语序
-    2. 中文需通顺，但允许保留轻微"外语感"
-    3. 可参考【全文总结】和【前文提要】理解语境
-    4. 输出必须是单个完整JSON数组，格式严格为：[{...}, {...}, {...}]，不要分行输出多个数组。
+      1. 尽量直译，保持原句逻辑和语序
+      2. 中文需通顺，但允许保留轻微"外语感"
+      3. 可参考【全文总结】和【前文提要】理解语境
+      4. 输出必须是单个完整JSON数组，格式严格为：[{...}, {...}, {...}]，不要分行输出多个数组。
 
-    输入示例：
-    [{"index": 1, "fr": "Et il faut être vraiment fort pour aller jusqu'au bout."}]
+      输入示例：
+      [{"index": 1, "fr": "Et il faut être vraiment fort pour aller jusqu'au bout."}]
 
-    输出示例：
-    [{"index": 1, "zh": "而且要走到最后，真的需要很强"}]
+      输出示例：
+      [{"index": 1, "zh": "而且要走到最后，真的需要很强"}]
 
-    全文总结（仅供理解）：
-    {summary}
+      全文总结（仅供理解）：
+      {summary}
 
-    前文提要：
-    {context}
+      前文提要：
+      {context}
 
-    待处理字幕：
-    {segments}
-  verbose: true
-
+      待处理字幕：
+      {segments}
+    verbose: true
