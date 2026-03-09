@@ -139,6 +139,138 @@ def test_get_summary_config_defaults_thinking_off():
     assert summary_config["enable_thinking"] is False
 
 
+def test_summarize_uses_map_reduce_for_long_transcripts(monkeypatch, tmp_path):
+    transcript_file = tmp_path / "transcript.json"
+    transcript_file.write_text(
+        json.dumps({"text": "a b c d e f g h i", "segments": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    generated_prompts = []
+
+    class FakeTokenizer:
+        def encode(self, text):
+            return text.split()
+
+        def decode(self, tokens):
+            return " ".join(tokens)
+
+        def apply_chat_template(self, messages, **kwargs):
+            return messages[0]["content"]
+
+    def fake_load(model_path):
+        return object(), FakeTokenizer()
+
+    def fake_generate(model, tokenizer, prompt, verbose=False, **kwargs):
+        generated_prompts.append(prompt)
+        return f"S{len(generated_prompts)}"
+
+    monkeypatch.setattr(translate_module, "load", fake_load)
+    monkeypatch.setattr(translate_module, "generate", fake_generate)
+    monkeypatch.setattr(
+        translate_module,
+        "load_config",
+        lambda: {
+            "translation": {
+                "summary": {
+                    "model_path": "mlx-community/gemma-3-4b-it-4bit",
+                    "prompt": "SUMMARY:{text}",
+                    "chunk_prompt": "CHUNK:{text}",
+                    "reduce_prompt": "REDUCE:{text}",
+                    "chunk_max_input_tokens": 4,
+                    "chunk_overlap_tokens": 1,
+                    "enable_thinking": False,
+                    "verbose": False,
+                }
+            }
+        },
+    )
+
+    summary, metadata = summarize(str(transcript_file), str(tmp_path), return_metadata=True)
+
+    assert summary == "S1\n\nS2\n\nS3"
+    assert metadata["strategy"] == "map_reduce"
+    assert metadata["chunk_count"] == 3
+    assert metadata["reduce_passes"] == 0
+    assert [chunk["text"] for chunk in metadata["chunks"]] == [
+        "a b c d",
+        "d e f g",
+        "g h i",
+    ]
+    assert generated_prompts == [
+        "CHUNK:a b c d",
+        "CHUNK:d e f g",
+        "CHUNK:g h i",
+    ]
+
+    details = json.loads((tmp_path / "04_summary_map_reduce.json").read_text(encoding="utf-8"))
+    assert details["strategy"] == "map_reduce"
+    assert details["chunk_count"] == 3
+
+
+def test_summarize_reduces_merged_chunk_summaries_when_still_too_long(monkeypatch, tmp_path):
+    transcript_file = tmp_path / "transcript.json"
+    transcript_file.write_text(
+        json.dumps({"text": "a b c d e f g", "segments": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    prompts = []
+
+    class FakeTokenizer:
+        def encode(self, text):
+            return text.split()
+
+        def decode(self, tokens):
+            return " ".join(tokens)
+
+        def apply_chat_template(self, messages, **kwargs):
+            return messages[0]["content"]
+
+    def fake_load(model_path):
+        return object(), FakeTokenizer()
+
+    def fake_generate(model, tokenizer, prompt, verbose=False, **kwargs):
+        prompts.append(prompt)
+        if prompt.startswith("CHUNK:"):
+            chunk_id = len([item for item in prompts if item.startswith("CHUNK:")])
+            return f"part{chunk_id} detail"
+        if prompt.startswith("REDUCE:"):
+            return "final summary"
+        raise AssertionError(f"Unexpected prompt: {prompt}")
+
+    monkeypatch.setattr(translate_module, "load", fake_load)
+    monkeypatch.setattr(translate_module, "generate", fake_generate)
+    monkeypatch.setattr(
+        translate_module,
+        "load_config",
+        lambda: {
+            "translation": {
+                "summary": {
+                    "model_path": "mlx-community/gemma-3-4b-it-4bit",
+                    "prompt": "SUMMARY:{text}",
+                    "chunk_prompt": "CHUNK:{text}",
+                    "reduce_prompt": "REDUCE:{text}",
+                    "chunk_max_input_tokens": 3,
+                    "chunk_overlap_tokens": 0,
+                    "enable_thinking": False,
+                    "verbose": False,
+                }
+            }
+        },
+    )
+
+    summary, metadata = summarize(str(transcript_file), str(tmp_path), return_metadata=True)
+
+    assert summary == "final summary"
+    assert metadata["strategy"] == "map_reduce"
+    assert metadata["chunk_count"] == 3
+    assert metadata["reduce_passes"] == 1
+    assert metadata["reduce_steps"][0]["input_token_count"] == 6
+    assert metadata["reduce_steps"][0]["output_token_count"] == 2
+    assert prompts[-1].startswith("REDUCE:")
+
+
 def test_convert_segments_to_translation_format():
     """
     Test converting transcript segments to LLM input format.

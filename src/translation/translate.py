@@ -5,7 +5,7 @@ import re
 import yaml
 import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 try:
@@ -426,10 +426,18 @@ def get_summary_config(config: Dict[str, Any]) -> Dict[str, Any]:
             'summary_prompt',
             '用中文简短总结以下内容(150字以内)： {text}'
         )
+    if 'chunk_prompt' not in summary_config:
+        summary_config['chunk_prompt'] = summary_config['prompt']
+    if 'reduce_prompt' not in summary_config:
+        summary_config['reduce_prompt'] = '用中文将以下分块摘要压缩整合为一个简短总结(150字以内)： {text}'
     if 'verbose' not in summary_config:
         summary_config['verbose'] = translation_config.get('verbose', False)
     if 'enable_thinking' not in summary_config:
         summary_config['enable_thinking'] = translation_config.get('summary_enable_thinking', False)
+    if 'chunk_max_input_tokens' not in summary_config:
+        summary_config['chunk_max_input_tokens'] = 60000
+    if 'chunk_overlap_tokens' not in summary_config:
+        summary_config['chunk_overlap_tokens'] = 5000
 
     return summary_config
 
@@ -456,7 +464,79 @@ def get_translation_step_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     return step_config
 
-def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
+def _fallback_summary(text: str) -> str:
+    return f"这是一个关于文稿的总结。原文总长度：{len(text)}字符。"
+
+
+def _encode_text(tokenizer: Any, text: str) -> List[Any]:
+    if hasattr(tokenizer, "encode"):
+        encoded = tokenizer.encode(text)
+        if hasattr(encoded, "ids"):
+            encoded = encoded.ids
+        if isinstance(encoded, list):
+            return encoded
+        return list(encoded)
+    return text.split()
+
+
+def _decode_tokens(tokenizer: Any, tokens: List[Any]) -> str:
+    if tokens and isinstance(tokens[0], int) and hasattr(tokenizer, "decode"):
+        return tokenizer.decode(tokens)
+    return " ".join(str(token) for token in tokens)
+
+
+def _count_tokens(tokenizer: Any, text: str) -> int:
+    return len(_encode_text(tokenizer, text))
+
+
+def _chunk_text_by_tokens(text: str, tokenizer: Any, chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
+    tokens = _encode_text(tokenizer, text)
+    if not tokens:
+        return [{"index": 1, "token_start": 0, "token_end": 0, "token_count": 0, "text": ""}]
+
+    if chunk_size <= 0:
+        chunk_size = len(tokens)
+    overlap = max(0, min(overlap, max(chunk_size - 1, 0)))
+    step = max(chunk_size - overlap, 1)
+
+    chunks = []
+    start = 0
+    chunk_index = 1
+    while start < len(tokens):
+        end = min(start + chunk_size, len(tokens))
+        chunk_tokens = tokens[start:end]
+        chunks.append({
+            "index": chunk_index,
+            "token_start": start,
+            "token_end": end,
+            "token_count": len(chunk_tokens),
+            "text": _decode_tokens(tokenizer, chunk_tokens),
+        })
+        if end >= len(tokens):
+            break
+        start += step
+        chunk_index += 1
+
+    return chunks
+
+
+def _generate_summary_text(
+    model: Any,
+    tokenizer: Any,
+    prompt_template: str,
+    text: str,
+    verbose: bool,
+    enable_thinking: bool,
+) -> Tuple[str, str]:
+    prompt = prompt_template.replace("{text}", text)
+    messages = [{"role": "user", "content": prompt}]
+    chat_template_kwargs = {"add_generation_prompt": True, "enable_thinking": enable_thinking}
+    formatted_prompt = tokenizer.apply_chat_template(messages, **chat_template_kwargs)
+    summary = generate(model, tokenizer, prompt=formatted_prompt, verbose=verbose)
+    return summary, prompt
+
+
+def summarize(transcript_file: str, output_dir: Optional[str] = None, return_metadata: bool = False):
     """
     Generate summary of transcript text.
     Takes refined transcript JSON and generates 150-200 words summary.
@@ -492,41 +572,117 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
         print(f"Original transcript saved to: {original_file}")
         print(f"Extracted text saved to: {text_file}")
 
+    summary = ""
+    prompt = ""
+    summary_tokenizer = None
+    map_reduce_details = {
+        "strategy": "mock",
+        "full_text_token_count": None,
+        "chunk_max_input_tokens": summary_config.get('chunk_max_input_tokens', 60000),
+        "chunk_overlap_tokens": summary_config.get('chunk_overlap_tokens', 5000),
+        "chunk_count": 0,
+        "reduce_passes": 0,
+        "chunks": [],
+        "reduce_steps": [],
+    }
+
     # Generate summary
     if load and generate:
         try:
-            # Load model
             model_path = summary_config.get('model_path', 'mlx-community/Qwen3.5-4B-4bit')
             model, tokenizer = load(model_path)
+            summary_tokenizer = tokenizer
+            chunk_limit = summary_config.get('chunk_max_input_tokens', 60000)
+            overlap = summary_config.get('chunk_overlap_tokens', 5000)
+            verbose = summary_config.get('verbose', False)
+            enable_thinking = summary_config.get('enable_thinking', False)
+            summary_prompt = summary_config.get('prompt', '用中文简短总结以下内容(150字以内)： {text}')
+            chunk_prompt = summary_config.get('chunk_prompt', summary_prompt)
+            reduce_prompt = summary_config.get('reduce_prompt', '用中文将以下分块摘要压缩整合为一个简短总结(150字以内)： {text}')
 
-            # Generate summary
-            summary_prompt = summary_config.get('prompt',
-                                                '用中文简短总结以下内容(150字以内)： {text}')
-            prompt = summary_prompt.replace("{text}", full_text)
+            full_text_token_count = _count_tokens(tokenizer, full_text)
+            map_reduce_details["full_text_token_count"] = full_text_token_count
 
-            messages = [{"role": "user", "content": prompt}]
-            chat_template_kwargs = {"add_generation_prompt": True}
-            if "enable_thinking" in summary_config:
-                chat_template_kwargs["enable_thinking"] = summary_config["enable_thinking"]
-            formatted_prompt = tokenizer.apply_chat_template(
-                messages, **chat_template_kwargs
-            )
+            if full_text_token_count > chunk_limit:
+                chunks = _chunk_text_by_tokens(full_text, tokenizer, chunk_limit, overlap)
+                chunk_summaries = []
+                for chunk in chunks:
+                    chunk_summary, chunk_prompt_text = _generate_summary_text(
+                        model,
+                        tokenizer,
+                        chunk_prompt,
+                        chunk["text"],
+                        verbose,
+                        enable_thinking,
+                    )
+                    chunk_details = {
+                        **chunk,
+                        "prompt": chunk_prompt_text,
+                        "summary": chunk_summary,
+                        "summary_token_count": _count_tokens(tokenizer, chunk_summary),
+                    }
+                    map_reduce_details["chunks"].append(chunk_details)
+                    chunk_summaries.append(chunk_summary)
 
-            summary = generate(model, tokenizer, prompt=formatted_prompt,
-                            verbose=summary_config.get('verbose', False))
+                summary = "\n\n".join(chunk_summaries)
+                prompt = "\n\n".join(chunk["prompt"] for chunk in map_reduce_details["chunks"])
+                map_reduce_details["strategy"] = "map_reduce"
+                map_reduce_details["chunk_count"] = len(map_reduce_details["chunks"])
+
+                while _count_tokens(tokenizer, summary) > chunk_limit:
+                    reduced_summary, reduce_prompt_text = _generate_summary_text(
+                        model,
+                        tokenizer,
+                        reduce_prompt,
+                        summary,
+                        verbose,
+                        enable_thinking,
+                    )
+                    map_reduce_details["reduce_passes"] += 1
+                    prompt = reduce_prompt_text
+                    map_reduce_details["reduce_steps"].append({
+                        "pass": map_reduce_details["reduce_passes"],
+                        "input_token_count": _count_tokens(tokenizer, summary),
+                        "output_token_count": _count_tokens(tokenizer, reduced_summary),
+                        "prompt": reduce_prompt_text,
+                        "summary": reduced_summary,
+                    })
+                    summary = reduced_summary
+            else:
+                summary, prompt = _generate_summary_text(
+                    model,
+                    tokenizer,
+                    summary_prompt,
+                    full_text,
+                    verbose,
+                    enable_thinking,
+                )
+                map_reduce_details["strategy"] = "single_pass"
+                map_reduce_details["chunk_count"] = 1
 
         except Exception as e:
             print(f"Warning: Could not generate summary with MLX-LM: {e}")
-            summary = f"这是一个关于文稿的总结。原文总长度：{len(full_text)}字符。"
+            summary = _fallback_summary(full_text)
+            map_reduce_details["strategy"] = "fallback"
     else:
-        # Mock summary when mlx_lm is not available
-        summary = f"这是一个关于文稿的总结。原文总长度：{len(full_text)}字符。"
+        summary = _fallback_summary(full_text)
+
+    map_reduce_details["final_summary_token_count"] = None
+    if summary_tokenizer is not None and map_reduce_details["strategy"] not in {"mock", "fallback"}:
+        try:
+            map_reduce_details["final_summary_token_count"] = _count_tokens(summary_tokenizer, summary)
+        except Exception:
+            map_reduce_details["final_summary_token_count"] = None
 
     # Save summary and comprehensive report if output directory specified
     if output_dir:
         summary_file = Path(output_dir) / "04_summary.txt"
         with open(summary_file, 'w', encoding='utf-8') as f:
             f.write(summary)
+
+        details_file = Path(output_dir) / "04_summary_map_reduce.json"
+        with open(details_file, 'w', encoding='utf-8') as f:
+            json.dump(map_reduce_details, f, ensure_ascii=False, indent=2)
 
         # Save comprehensive summary report
         report_file = Path(output_dir) / "04_summary_report.txt"
@@ -546,6 +702,13 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
             f.write(f"- Original text length: {len(full_text)} characters\n")
             f.write(f"- Original text words: {len(full_text.split())} words\n")
             f.write(f"- Number of segments: {len(transcript.get('segments', []))}\n")
+            f.write(f"- Summary strategy: {map_reduce_details['strategy']}\n")
+            if map_reduce_details["full_text_token_count"] is not None:
+                f.write(f"- Estimated input tokens: {map_reduce_details['full_text_token_count']}\n")
+            f.write(f"- Chunk max input tokens: {map_reduce_details['chunk_max_input_tokens']}\n")
+            f.write(f"- Chunk overlap tokens: {map_reduce_details['chunk_overlap_tokens']}\n")
+            f.write(f"- Chunk count: {map_reduce_details['chunk_count']}\n")
+            f.write(f"- Reduce passes: {map_reduce_details['reduce_passes']}\n")
 
             f.write(f"\nFinal Prompt Sent to Model:\n")
             f.write("-" * 50 + "\n")
@@ -563,17 +726,36 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None) -> str:
             f.write(f"\nResult Statistics:\n")
             f.write(f"- Summary length: {len(summary)} characters\n")
             f.write(f"- Summary words: {len(summary.split())} words\n")
+            if map_reduce_details["final_summary_token_count"] is not None:
+                f.write(f"- Summary tokens: {map_reduce_details['final_summary_token_count']}\n")
 
             # Validate if summary contains Chinese characters
             chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
             has_chinese = bool(chinese_pattern.search(summary))
             f.write(f"- Contains Chinese characters: {has_chinese}\n")
 
+            if map_reduce_details["chunks"]:
+                f.write(f"\nChunk Summaries:\n")
+                for chunk in map_reduce_details["chunks"]:
+                    f.write(f"- Chunk {chunk['index']}: tokens {chunk['token_start']}-{chunk['token_end']} ")
+                    f.write(f"({chunk['token_count']} input, {chunk['summary_token_count']} summary)\n")
+
+            if map_reduce_details["reduce_steps"]:
+                f.write(f"\nReduce Passes:\n")
+                for reduce_step in map_reduce_details["reduce_steps"]:
+                    f.write(
+                        f"- Pass {reduce_step['pass']}: "
+                        f"{reduce_step['input_token_count']} -> {reduce_step['output_token_count']} tokens\n"
+                    )
+
             f.write(f"\nTimestamp: {Path.cwd()}\n")
 
         print(f"Summary saved to: {summary_file}")
         print(f"Summary report saved to: {report_file}")
+        print(f"Summary map-reduce details saved to: {details_file}")
 
+    if return_metadata:
+        return summary, map_reduce_details
     return summary
 
 def sanitize_model_output(output: str) -> str:
@@ -1165,7 +1347,7 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
 
     # Step 1: Generate summary
     print("Step 1: Generating summary...")
-    summary = summarize(transcript_file, output_dir)
+    summary, _ = summarize(transcript_file, output_dir, return_metadata=True)
 
     # Step 2: Preprocess segments for translation
     print("Step 2: Preprocessing segments...")
@@ -1232,6 +1414,7 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
         f.write("02_filtered_segments.json - Segments after filtering empty content\n")
         f.write("03_ordered_segments.json - Segments ordered by ID\n")
         f.write("04_summary.txt - Generated summary of the transcript\n")
+        f.write("04_summary_map_reduce.json - Chunking and reduce-pass metadata for summary generation\n")
         f.write("05_translation_context.txt - Summary and segments sent for translation\n")
         f.write("06_translation_prompt.txt - Full prompt sent to LLM\n")
         f.write("07_llm_raw_response.json - Raw response from LLM (JSON format)\n")
@@ -1393,8 +1576,17 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         update_step_status(state, "summary", "running")
         save_state(state, output_dir)
 
-        summary = summarize(str(refined_file), output_dir)
-        update_step_status(state, "summary", "completed")
+        summary, summary_details = summarize(str(refined_file), output_dir, return_metadata=True)
+        update_step_status(
+            state,
+            "summary",
+            "completed",
+            strategy=summary_details.get("strategy"),
+            chunk_count=summary_details.get("chunk_count"),
+            reduce_passes=summary_details.get("reduce_passes"),
+            input_tokens=summary_details.get("full_text_token_count"),
+            output_tokens=summary_details.get("final_summary_token_count"),
+        )
         save_state(state, output_dir)
 
     # Step 3: Preprocess refined segments for translation
@@ -1501,6 +1693,12 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         f.write("   - Merge fragmented sentences\n")
         f.write("   - Split long blocks\n")
         f.write("2. Summary Generation\n")
+        summary_state = state["steps"].get("summary", {})
+        f.write(f"   - Strategy: {summary_state.get('strategy', 'unknown')}\n")
+        if summary_state.get("chunk_count") is not None:
+            f.write(f"   - Chunks: {summary_state.get('chunk_count')}\n")
+        if summary_state.get("reduce_passes") is not None:
+            f.write(f"   - Reduce passes: {summary_state.get('reduce_passes')}\n")
         f.write("3. LLM Translation\n")
         f.write("4. Merging Translations\n\n")
 
