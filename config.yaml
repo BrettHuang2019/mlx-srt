@@ -20,7 +20,7 @@ translation:
     verbose: true
   translate:
     model_path: "mlx-community/HY-MT1.5-1.8B-8bit"
-    batch_size: 20
+    batch_size: 10
     max_tokens: 2048
     temperature: 0.5
     max_retries: 1
