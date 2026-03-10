@@ -22,7 +22,9 @@ from translation.translate import (
     translate_transcript,
     get_summary_config,
     load_config,
-    translation_pipeline
+    translation_pipeline,
+    sanitize_model_output,
+    validate_and_parse_batch_response,
 )
 import translation.translate as translate_module
 
@@ -269,6 +271,31 @@ def test_summarize_reduces_merged_chunk_summaries_when_still_too_long(monkeypatc
     assert metadata["reduce_steps"][0]["input_token_count"] == 6
     assert metadata["reduce_steps"][0]["output_token_count"] == 2
     assert prompts[-1].startswith("REDUCE:")
+
+
+def test_sanitize_model_output_fixes_smart_quote_string_terminators():
+    response = '[{"index": 1, "zh": "不，但他的丈夫确实给了她。”}]'
+
+    sanitized = sanitize_model_output(response)
+
+    assert sanitized == '[{"index": 1, "zh": "不，但他的丈夫确实给了她。"}]'
+
+
+def test_validate_and_parse_batch_response_handles_smart_quote_terminator():
+    batch_segments = [{"index": 1, "fr": "Non, mais son mari lui en a bien donne."}]
+    response = '[{"index": 1, "zh": "不，但他的丈夫确实给了她。”}]'
+
+    parsed = validate_and_parse_batch_response(response, batch_segments, 0)
+
+    assert parsed == [{"index": 1, "zh": "不，但他的丈夫确实给了她。"}]
+
+
+def test_sanitize_model_output_preserves_smart_quotes_inside_valid_string_content():
+    response = '[{"index": 1, "zh": "他说“你好”，然后离开。"}]'
+
+    sanitized = sanitize_model_output(response)
+
+    assert sanitized == response
 
 
 def test_convert_segments_to_translation_format():

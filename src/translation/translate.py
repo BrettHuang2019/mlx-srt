@@ -758,37 +758,70 @@ def summarize(transcript_file: str, output_dir: Optional[str] = None, return_met
         return summary, map_reduce_details
     return summary
 
+SMART_DOUBLE_QUOTES = {'\u201c', '\u201d', '\u201f', '\u00ab', '\u00bb', '\u2039', '\u203a', '\u300c', '\u300d', '\u300e', '\u300f'}
+SMART_SINGLE_QUOTES = {'\u2018', '\u2019', '\u201b'}
+JSON_STRING_END_CHARS = {',', '}', ']', ':'}
+
+
+def _next_non_whitespace_char(text: str, start: int) -> str:
+    """Return the next non-whitespace character after start, or an empty string."""
+    while start < len(text):
+        if not text[start].isspace():
+            return text[start]
+        start += 1
+    return ''
+
+
 def sanitize_model_output(output: str) -> str:
-    """Sanitize model output by removing smart quotes that break JSON parsing."""
-    # Remove specific Unicode quote characters that confuse the JSON parser
-    # Keep all other Chinese punctuation for readability
-    quote_chars = [
-        '\u2018',  # '
-        '\u2019',  # '
-        '\u201b',  # '
-        '\u201c',  # "
-        '\u201d',  # "
-        '\u201f',  # "
-        '\u00ab',  # «
-        '\u00bb',  # »
-        '\u2039',  # ‹
-        '\u203a',  # ›
-        '\u300c',  # 「
-        '\u300d',  # 」
-        '\u300e',  # 『
-        '\u300f',  # 』
-        '\u2014',  # —
-        '\u2013',  # –
-        '\u2026',  # …
-    ]
-    for char in quote_chars:
-        output = output.replace(char, '')
+    """Normalize smart-quote JSON delimiters without corrupting valid string content."""
+    sanitized = []
+    in_string = False
+    escape = False
+
+    for i, char in enumerate(output):
+        next_char = _next_non_whitespace_char(output, i + 1)
+
+        if escape:
+            sanitized.append(char)
+            escape = False
+            continue
+
+        if char == '\\':
+            sanitized.append(char)
+            if in_string:
+                escape = True
+            continue
+
+        if not in_string:
+            if char == '"':
+                in_string = True
+                sanitized.append(char)
+            elif char in SMART_DOUBLE_QUOTES or char in SMART_SINGLE_QUOTES:
+                in_string = True
+                sanitized.append('"')
+            else:
+                sanitized.append(char)
+            continue
+
+        if char == '"':
+            in_string = False
+            sanitized.append(char)
+            continue
+
+        if char in SMART_DOUBLE_QUOTES or char in SMART_SINGLE_QUOTES:
+            if next_char in JSON_STRING_END_CHARS or not next_char:
+                in_string = False
+                sanitized.append('"')
+            else:
+                sanitized.append(char)
+            continue
+
+        sanitized.append(char)
+
+    output = ''.join(sanitized)
 
     # Fix common JSON structure mistakes made by the model
-    # The model sometimes forgets the closing quote for string values
-    # Pattern: "...value'}]" should become "...value"}]"
     output = output.replace("'}]", "\"}]")
-    # Pattern: "...value'}" should become "...value"}"  (for single items)
     output = output.replace("'}", "\"}")
 
     return output
