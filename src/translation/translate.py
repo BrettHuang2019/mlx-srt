@@ -35,6 +35,19 @@ def save_state(state: Dict[str, Any], output_dir: str):
     with open(state_file, 'w', encoding='utf-8') as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+def prepare_state_for_resume(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize persisted state so a failed pipeline can resume cleanly."""
+    if not state:
+        return state
+
+    pipeline_info = state.setdefault("pipeline_info", {})
+    pipeline_info["status"] = "running"
+    pipeline_info["last_checkpoint"] = datetime.now().isoformat()
+    pipeline_info.pop("end_time", None)
+    pipeline_info.pop("error", None)
+
+    return state
+
 def create_initial_state(whisper_transcript: str, output_dir: str, url: str = None, downloaded_file: str = None, video_title: str = None) -> Dict[str, Any]:
     """Create initial state structure for a new translation pipeline"""
     import uuid
@@ -157,6 +170,8 @@ def update_batch_status(state: Dict[str, Any], batch_id: str, status: str, **kwa
         if batch_id in translation_step["failed_batches"]:
             translation_step["failed_batches"].remove(batch_id)
     elif status == "failed":
+        if batch_id in translation_step["completed_batches"]:
+            translation_step["completed_batches"].remove(batch_id)
         if batch_id not in translation_step["failed_batches"]:
             translation_step["failed_batches"].append(batch_id)
     elif status == "running":
@@ -173,6 +188,63 @@ def update_batch_status(state: Dict[str, Any], batch_id: str, status: str, **kwa
         translation_step["batch_details"][batch_id][key] = value
 
     state["pipeline_info"]["last_checkpoint"] = datetime.now().isoformat()
+
+def load_cached_batch_translation(output_dir: Optional[str], batch_id: str,
+                                  batch_segments: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """Load the newest valid cached translation result for a batch or its split descendants."""
+    if not output_dir:
+        return None
+
+    output_path = Path(output_dir)
+    candidate_files = sorted(
+        output_path.glob(f"07_llm_response_{batch_id}*.json"),
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )
+
+    exact_name_pattern = re.compile(rf"^07_llm_response_{re.escape(batch_id)}(?:_retry_\d+)?\.json$")
+
+    for candidate_file in candidate_files:
+        if not exact_name_pattern.match(candidate_file.name):
+            continue
+
+        try:
+            with open(candidate_file, 'r', encoding='utf-8') as f:
+                cached_response = json.load(f)
+
+            return validate_and_parse_batch_response(
+                cached_response["raw_response"],
+                batch_segments,
+                -1,
+            )
+        except (KeyError, ValueError, json.JSONDecodeError):
+            continue
+
+    if len(batch_segments) <= 1:
+        return None
+
+    first_half_id = f"{batch_id}_a"
+    second_half_id = f"{batch_id}_b"
+    first_half = batch_segments[:len(batch_segments) // 2]
+    second_half = batch_segments[len(batch_segments) // 2:]
+
+    first_half_cached = load_cached_batch_translation(output_dir, first_half_id, first_half)
+    second_half_cached = load_cached_batch_translation(output_dir, second_half_id, second_half)
+
+    if first_half_cached is not None and second_half_cached is not None:
+        return first_half_cached + second_half_cached
+
+    return None
+
+def has_split_batch_artifacts(output_dir: Optional[str], batch_id: str) -> bool:
+    """Return True when recursive split artifacts exist for this batch."""
+    if not output_dir:
+        return False
+
+    output_path = Path(output_dir)
+    return any(output_path.glob(f"07_llm_response_{batch_id}_a*.json")) or any(
+        output_path.glob(f"07_llm_response_{batch_id}_b*.json")
+    )
 
 def get_resume_point(state: Dict[str, Any], output_dir: str) -> Optional[str]:
     """Determine where to resume the pipeline based on state and existing files"""
@@ -466,6 +538,38 @@ def get_translation_step_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def _fallback_summary(text: str) -> str:
     return f"这是一个关于文稿的总结。原文总长度：{len(text)}字符。"
+
+
+def _generate_with_temperature(model: Any, tokenizer: Any, *, prompt: str,
+                               verbose: bool, max_tokens: int,
+                               temperature: Optional[float] = None) -> str:
+    """Use MLX generation with temp-style sampling configuration."""
+    base_kwargs = {
+        "prompt": prompt,
+        "verbose": verbose,
+        "max_tokens": max_tokens,
+    }
+
+    if temperature is None:
+        return generate(model, tokenizer, **base_kwargs)
+
+    try:
+        return generate(
+            model,
+            tokenizer,
+            temp=temperature,
+            **base_kwargs,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument 'temp'" not in str(exc):
+            raise
+
+    return generate(
+        model,
+        tokenizer,
+        temperature=temperature,
+        **base_kwargs,
+    )
 
 
 def _encode_text(tokenizer: Any, text: str) -> List[Any]:
@@ -911,6 +1015,11 @@ def process_batch_recursive(segments: List[Dict[str, Any]], summary: str, contex
     indent = "  " * depth
     print(f"{indent}📦 Processing batch ({len(segments)} segments)...")
 
+    cached_result = load_cached_batch_translation(output_dir, batch_id, segments)
+    if cached_result is not None:
+        print(f"{indent}♻️  Using cached result for {batch_id}")
+        return cached_result
+
     # Base case: single sentence - if it fails, we cannot split further
     if len(segments) == 1:
         print(f"{indent}🔍 Single sentence batch - attempting with retries...")
@@ -919,6 +1028,31 @@ def process_batch_recursive(segments: List[Dict[str, Any]], summary: str, contex
             translation_prompt, max_tokens, temperature, verbose,
             max_retries, retry_delay, output_dir, batch_id, depth, indent
         )
+
+    if has_split_batch_artifacts(output_dir, batch_id):
+        print(f"{indent}♻️  Resuming from split sub-batches for {batch_id}")
+
+        mid_point = len(segments) // 2
+        first_half = segments[:mid_point]
+        second_half = segments[mid_point:]
+
+        first_half_id = f"{batch_id}_a"
+        second_half_id = f"{batch_id}_b"
+
+        first_result = process_batch_recursive(
+            first_half, summary, context_text, model, tokenizer,
+            translation_prompt, max_tokens, temperature, verbose,
+            max_retries, retry_delay, output_dir, first_half_id, depth + 1
+        )
+        second_result = process_batch_recursive(
+            second_half, summary, context_text, model, tokenizer,
+            translation_prompt, max_tokens, temperature, verbose,
+            max_retries, retry_delay, output_dir, second_half_id, depth + 1
+        )
+
+        combined_result = first_result + second_result
+        print(f"{indent}✅ Combined resumed result: {len(combined_result)} segments")
+        return combined_result
 
     # Try processing current batch first
     try:
@@ -996,7 +1130,14 @@ def process_single_batch_with_retries(segments: List[Dict[str, Any]], summary: s
         try:
             # Generate response
             generation_start_time = time.time()
-            response = generate(model, tokenizer, prompt=formatted_prompt, verbose=verbose, max_tokens=max_tokens)
+            response = _generate_with_temperature(
+                model,
+                tokenizer,
+                prompt=formatted_prompt,
+                verbose=verbose,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
             generation_time = time.time() - generation_start_time
 
             # Validate and parse response
@@ -1125,16 +1266,15 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
         # Check if batch already completed (for resume functionality)
         if state and batch_id in state["steps"]["translation"].get("completed_batches", []):
             print(f"  ✅ Batch {batch_id} already completed, skipping...")
-            # Load existing translated segments for this batch
-            response_file = output_path / f"07_llm_response_{batch_id}.json"
-            if response_file.exists():
-                with open(response_file, 'r', encoding='utf-8') as f:
-                    batch_response = json.load(f)
-                batch_translated = validate_and_parse_batch_response(batch_response["raw_response"], batch_segments, -1)
+            batch_translated = load_cached_batch_translation(output_dir, batch_id, batch_segments)
+            if batch_translated is not None:
                 translated_segments.extend(batch_translated)
                 continue
-            else:
-                print(f"  ⚠️  Response file missing for completed batch {batch_id}, reprocessing...")
+
+            print(f"  ⚠️  No valid cached response found for completed batch {batch_id}, reprocessing...")
+            if state:
+                update_batch_status(state, batch_id, "failed", error="Cached response invalid or missing")
+                save_state(state, output_dir)
 
         # Update batch status to running
         if state:
@@ -1207,7 +1347,14 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
 
         # Generate translation
         generation_start_time = time.time()
-        response = generate(model, tokenizer, prompt=formatted_prompt, verbose=verbose, max_tokens=max_tokens)
+        response = _generate_with_temperature(
+            model,
+            tokenizer,
+            prompt=formatted_prompt,
+            verbose=verbose,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
         generation_time = time.time() - generation_start_time
         batch_total_time = time.time() - batch_start_time
 
@@ -1518,6 +1665,8 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
                 if final_file.exists():
                     with open(final_file, 'r', encoding='utf-8') as f:
                         return json.load(f)
+
+            state = prepare_state_for_resume(state)
     else:
         state = create_initial_state("whisper_transcript", output_dir, url, downloaded_file, video_title)
 

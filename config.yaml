@@ -1,5 +1,5 @@
 whisper:
-  model_path: "mlx-community/whisper-large-v3-turbo"
+  model_path: "mlx-community/whisper-large-v3-asr-8bit"
   initial_prompt: null
   language: "french"
 
@@ -10,7 +10,7 @@ system:
 
 translation:
   summary:
-    model_path: "mlx-community/gemma-3-4b-it-4bit"
+    model_path: "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     prompt: "用中文简短总结以下内容(150字以内)： {text}"
     chunk_prompt: "用中文简短总结以下这部分转录内容，保留关键人物、事件和上下文线索(150字以内)： {text}"
     reduce_prompt: "用中文将以下多个分块摘要压缩整合为一个紧凑总结，保留关键上下文供后续字幕翻译使用(150字以内)： {text}"
@@ -22,7 +22,7 @@ translation:
     model_path: "mlx-community/HY-MT1.5-1.8B-8bit"
     batch_size: 10
     max_tokens: 2048
-    temperature: 0.5
+    temperature: 0
     max_retries: 1
     retry_delay: 1.0
     translation_prompt: |

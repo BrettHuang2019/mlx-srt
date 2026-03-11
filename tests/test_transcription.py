@@ -1,5 +1,6 @@
 import pytest
 from src.transcription.whisper_transcriber import transcribe_audio
+from src.transcription import whisper_transcriber
 import os
 import json
 
@@ -67,3 +68,75 @@ class TestWhisperTranscription:
         assert isinstance(self.result, dict)
         assert "text" in self.result
         assert "segments" in self.result
+
+
+def test_patch_mlx_whisper_loader_filters_unknown_model_config_keys(tmp_path, monkeypatch):
+    if not whisper_transcriber.MLX_WHISPER_AVAILABLE:
+        pytest.skip("mlx_whisper is not installed")
+
+    repo_dir = tmp_path / "mock-whisper-repo"
+    repo_dir.mkdir()
+    (repo_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "num_mel_bins": 128,
+                "max_source_positions": 1500,
+                "d_model": 1280,
+                "encoder_attention_heads": 20,
+                "encoder_layers": 32,
+                "vocab_size": 51866,
+                "max_target_positions": 448,
+                "decoder_attention_heads": 20,
+                "decoder_layers": 32,
+                "activation_dropout": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (repo_dir / "weights.safetensors").write_text("stub", encoding="utf-8")
+
+    captured = {}
+
+    def fake_whisper(model_args, dtype):
+        captured["model_args"] = model_args
+        captured["dtype"] = dtype
+
+        class DummyModel:
+            def update(self, weights):
+                captured["weights"] = weights
+
+            def parameters(self):
+                return []
+
+        return DummyModel()
+
+    monkeypatch.setattr(
+        whisper_transcriber.mlx_whisper.load_models.mx,
+        "load",
+        lambda path: {"encoder.weight": 1},
+    )
+    monkeypatch.setattr(
+        whisper_transcriber.mlx_whisper.load_models.mx,
+        "eval",
+        lambda params: None,
+    )
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "tree_unflatten",
+        lambda items: {"tree": items},
+    )
+    monkeypatch.setattr(
+        whisper_transcriber.mlx_whisper.load_models.whisper,
+        "Whisper",
+        fake_whisper,
+    )
+
+    model = whisper_transcriber.mlx_whisper.load_models.load_model(
+        str(repo_dir),
+        dtype="float16",
+    )
+
+    assert model is not None
+    assert captured["model_args"].n_mels == 128
+    assert captured["model_args"].n_text_layer == 32
+    assert not hasattr(captured["model_args"], "activation_dropout")
