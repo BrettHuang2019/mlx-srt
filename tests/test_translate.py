@@ -141,55 +141,6 @@ def test_get_summary_config_defaults_thinking_off():
     assert summary_config["enable_thinking"] is False
 
 
-def test_generate_with_temperature_prefers_temp_argument(monkeypatch):
-    captured = {}
-
-    def fake_generate(model, tokenizer, **kwargs):
-        captured["kwargs"] = kwargs
-        return "ok"
-
-    monkeypatch.setattr(translate_module, "generate", fake_generate)
-
-    result = translate_module._generate_with_temperature(
-        object(),
-        object(),
-        prompt="formatted-prompt",
-        verbose=False,
-        max_tokens=123,
-        temperature=0.1,
-    )
-
-    assert result == "ok"
-    assert captured["kwargs"]["temp"] == 0.1
-    assert "temperature" not in captured["kwargs"]
-    assert "sampler" not in captured["kwargs"]
-
-
-def test_generate_with_temperature_falls_back_to_legacy_temperature(monkeypatch):
-    captured = {}
-
-    def fake_generate(model, tokenizer, **kwargs):
-        if "temp" in kwargs:
-            raise TypeError("generate_step() got an unexpected keyword argument 'temp'")
-        captured["kwargs"] = kwargs
-        return "ok"
-
-    monkeypatch.setattr(translate_module, "generate", fake_generate)
-
-    result = translate_module._generate_with_temperature(
-        object(),
-        object(),
-        prompt="formatted-prompt",
-        verbose=True,
-        max_tokens=456,
-        temperature=0.2,
-    )
-
-    assert result == "ok"
-    assert captured["kwargs"]["temperature"] == 0.2
-    assert "sampler" not in captured["kwargs"]
-
-
 def test_summarize_uses_map_reduce_for_long_transcripts(monkeypatch, tmp_path):
     transcript_file = tmp_path / "transcript.json"
     transcript_file.write_text(

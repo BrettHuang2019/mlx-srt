@@ -19,7 +19,7 @@ translation:
     enable_thinking: false
     verbose: true
   translate:
-    model_path: "mlx-community/HY-MT1.5-1.8B-8bit"
+    model_path: "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     batch_size: 10
     max_tokens: 2048
     temperature: 0

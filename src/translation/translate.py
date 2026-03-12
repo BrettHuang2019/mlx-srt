@@ -540,38 +540,6 @@ def _fallback_summary(text: str) -> str:
     return f"这是一个关于文稿的总结。原文总长度：{len(text)}字符。"
 
 
-def _generate_with_temperature(model: Any, tokenizer: Any, *, prompt: str,
-                               verbose: bool, max_tokens: int,
-                               temperature: Optional[float] = None) -> str:
-    """Use MLX generation with temp-style sampling configuration."""
-    base_kwargs = {
-        "prompt": prompt,
-        "verbose": verbose,
-        "max_tokens": max_tokens,
-    }
-
-    if temperature is None:
-        return generate(model, tokenizer, **base_kwargs)
-
-    try:
-        return generate(
-            model,
-            tokenizer,
-            temp=temperature,
-            **base_kwargs,
-        )
-    except TypeError as exc:
-        if "unexpected keyword argument 'temp'" not in str(exc):
-            raise
-
-    return generate(
-        model,
-        tokenizer,
-        temperature=temperature,
-        **base_kwargs,
-    )
-
-
 def _encode_text(tokenizer: Any, text: str) -> List[Any]:
     if hasattr(tokenizer, "encode"):
         encoded = tokenizer.encode(text)
@@ -1130,14 +1098,7 @@ def process_single_batch_with_retries(segments: List[Dict[str, Any]], summary: s
         try:
             # Generate response
             generation_start_time = time.time()
-            response = _generate_with_temperature(
-                model,
-                tokenizer,
-                prompt=formatted_prompt,
-                verbose=verbose,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            response = generate(model, tokenizer, prompt=formatted_prompt, verbose=verbose, max_tokens=max_tokens)
             generation_time = time.time() - generation_start_time
 
             # Validate and parse response
@@ -1347,14 +1308,7 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
 
         # Generate translation
         generation_start_time = time.time()
-        response = _generate_with_temperature(
-            model,
-            tokenizer,
-            prompt=formatted_prompt,
-            verbose=verbose,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        response = generate(model, tokenizer, prompt=formatted_prompt, verbose=verbose, max_tokens=max_tokens)
         generation_time = time.time() - generation_start_time
         batch_total_time = time.time() - batch_start_time
 
