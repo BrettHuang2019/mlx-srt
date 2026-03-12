@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+import main as main_module
 from main import main
 
 
@@ -60,6 +61,42 @@ def test_auto_resume_behavior():
             print("✗ Auto-resume detection failed: State file not found")
 
         assert auto_resume, "Auto-resume should detect existing state file"
+
+
+def test_explicit_resume_without_output_dir_starts_fresh(monkeypatch, tmp_path):
+    """Explicit resume should fall back to a fresh run when the output directory is missing."""
+    input_audio = tmp_path / "sample.mp3"
+    input_audio.write_bytes(b"fake audio")
+
+    output_dir = tmp_path / "missing_output"
+    transcript = {
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "Bonjour", "zh": "\u4f60\u597d"}
+        ]
+    }
+
+    monkeypatch.setattr(main_module, "check_system_resources", lambda: True)
+    monkeypatch.setattr(main_module, "process_audio_file", lambda *args, **kwargs: transcript)
+    monkeypatch.setattr(main_module, "generate_srt_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            str(input_audio),
+            "--output",
+            str(output_dir),
+            "--resume",
+            "--no-srt",
+            "--keep-artifacts",
+        ],
+    )
+
+    main()
+
+    final_transcript_path = output_dir / f"{input_audio.stem}_translated.json"
+    assert output_dir.exists()
+    assert final_transcript_path.exists()
 
 
 if __name__ == "__main__":

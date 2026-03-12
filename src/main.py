@@ -32,7 +32,8 @@ If you run the same command with the same output directory, it will:
 3. Resume from the first incomplete step
 4. Skip already processed batches
 
-Use --resume flag to explicitly require existing state (fails if none found).
+Use --resume flag to explicitly resume when existing state is found.
+If the output directory does not exist yet, the pipeline starts a fresh run instead.
 """
 
 import argparse
@@ -350,7 +351,7 @@ Examples:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Require resuming from existing state (fails if no state found). Without this flag, will auto-resume if state exists."
+        help="Resume from existing state when available. If the output directory does not exist yet, starts a fresh run. Without this flag, will auto-resume if state exists."
     )
 
     args = parser.parse_args()
@@ -396,22 +397,26 @@ Examples:
             print(f"📋 Found existing state in: {output_dir}")
             print(f"🔄 Will automatically resume from last checkpoint")
 
-    # Only validate explicit resume flag
+    resume_flag = auto_resume
+
+    # Validate explicit resume flag
     if args.resume and not auto_resume:
         if not output_dir.exists():
-            print(f"Error: Cannot resume - output directory does not exist: {output_dir}")
-            print(f"Please run without --resume first to create the output directory.")
-            sys.exit(1)
+            print(f"⚠️  Resume requested but output directory does not exist: {output_dir}")
+            print(f"Starting a fresh run and creating the output directory.")
 
-        state_file = output_dir / "state.json"
-        if not state_file.exists():
-            print(f"Error: Cannot resume - no state file found: {state_file}")
-            print(f"Please run without --resume first to create the initial state.")
-            sys.exit(1)
+        else:
+            state_file = output_dir / "state.json"
+            if not state_file.exists():
+                print(f"Error: Cannot resume - no state file found: {state_file}")
+                print(f"Please run without --resume first to create the initial state.")
+                sys.exit(1)
 
-        print(f"📋 Explicitly resuming from existing state in: {output_dir}")
+            print(f"📋 Explicitly resuming from existing state in: {output_dir}")
+            resume_flag = True
     elif args.resume and auto_resume:
         print(f"📋 Resume flag specified - using existing state in: {output_dir}")
+        resume_flag = True
 
     # Validate input
     if not input_is_url:
@@ -435,7 +440,6 @@ Examples:
 
     try:
         # Process file based on type
-        resume_flag = args.resume or auto_resume
         downloaded_video_path = None
 
         if input_is_url:
