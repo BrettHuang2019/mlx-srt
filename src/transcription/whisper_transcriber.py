@@ -1,5 +1,6 @@
 import json
 import os
+import string
 from dataclasses import fields
 from pathlib import Path
 
@@ -95,6 +96,9 @@ def _patch_mlx_whisper_loader():
 _patch_mlx_whisper_loader()
 
 
+PUNCTUATION_CHARS = set(string.punctuation) | set("，。！？；：、…“”‘’《》【】（）")
+
+
 def load_config(config_path="config.yaml"):
     """
     Load configuration from YAML file
@@ -110,8 +114,10 @@ def load_config(config_path="config.yaml"):
         return {
             "whisper": {
                 "model_path": "models/large",
+                "fallback_model_paths": [],
                 "initial_prompt": None,
-                "language": "french"
+                "language": "french",
+                "min_punctuation_ratio": 0.005,
             }
         }
 
@@ -119,6 +125,58 @@ def load_config(config_path="config.yaml"):
         config = yaml.safe_load(f)
 
     return config
+
+
+def _resolve_model_paths(whisper_config):
+    model_path = whisper_config.get("model_path", "models/large")
+    fallback_model_paths = whisper_config.get("fallback_model_paths", [])
+
+    if isinstance(model_path, (list, tuple)):
+        candidate_paths = list(model_path)
+    else:
+        candidate_paths = [model_path]
+
+    if fallback_model_paths:
+        candidate_paths.extend(fallback_model_paths)
+
+    deduped_paths = []
+    seen = set()
+    for path in candidate_paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped_paths.append(path)
+
+    return deduped_paths or ["models/large"]
+
+
+def _calculate_punctuation_ratio(text):
+    if not text:
+        return 0.0
+
+    non_whitespace_chars = [char for char in text if not char.isspace()]
+    if not non_whitespace_chars:
+        return 0.0
+
+    punctuation_count = sum(1 for char in non_whitespace_chars if char in PUNCTUATION_CHARS)
+    return punctuation_count / len(non_whitespace_chars)
+
+
+def _clean_transcription_result(result):
+    clean_segments = []
+    for segment in result["segments"]:
+        clean_segment = {
+            "id": segment["id"],
+            "start": segment["start"],
+            "end": segment["end"],
+            "text": segment["text"]
+        }
+        clean_segments.append(clean_segment)
+
+    return {
+        "text": result["text"],
+        "segments": clean_segments
+    }
 
 
 def transcribe_audio(speech_file, config_path="config.yaml"):
@@ -140,11 +198,11 @@ def transcribe_audio(speech_file, config_path="config.yaml"):
 
     config = load_config(config_path)
     whisper_config = config.get("whisper", {})
+    model_paths = _resolve_model_paths(whisper_config)
+    min_punctuation_ratio = whisper_config.get("min_punctuation_ratio", 0.005)
 
     # Prepare whisper parameters
-    whisper_params = {
-        "path_or_hf_repo": whisper_config.get("model_path", "models/large")
-    }
+    whisper_params = {}
 
     # Add language if specified
     language = whisper_config.get("language")
@@ -156,20 +214,44 @@ def transcribe_audio(speech_file, config_path="config.yaml"):
     if initial_prompt:
         whisper_params["initial_prompt"] = initial_prompt
 
-    result = mlx_whisper.transcribe(speech_file, **whisper_params)
+    last_error = None
+    best_result = None
+    best_ratio = -1.0
 
-    # Clean up segments to only include required fields
-    clean_segments = []
-    for segment in result["segments"]:
-        clean_segment = {
-            "id": segment["id"],
-            "start": segment["start"],
-            "end": segment["end"],
-            "text": segment["text"]
-        }
-        clean_segments.append(clean_segment)
+    for index, model_path in enumerate(model_paths):
+        try:
+            result = mlx_whisper.transcribe(
+                speech_file,
+                path_or_hf_repo=model_path,
+                **whisper_params,
+            )
+        except Exception as exc:
+            last_error = exc
+            if index == len(model_paths) - 1:
+                raise
+            print(f"Whisper transcription failed with model '{model_path}': {exc}. Trying fallback model.")
+            continue
 
-    return {
-        "text": result["text"],
-        "segments": clean_segments
-    }
+        clean_result = _clean_transcription_result(result)
+        punctuation_ratio = _calculate_punctuation_ratio(clean_result["text"])
+
+        if punctuation_ratio > best_ratio:
+            best_ratio = punctuation_ratio
+            best_result = clean_result
+
+        if punctuation_ratio >= min_punctuation_ratio:
+            return clean_result
+
+        if index < len(model_paths) - 1:
+            print(
+                f"Whisper transcription with model '{model_path}' had low punctuation ratio "
+                f"({punctuation_ratio:.4f} < {min_punctuation_ratio:.4f}). Trying fallback model."
+            )
+
+    if best_result is not None:
+        return best_result
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError("Whisper transcription failed without producing a result.")

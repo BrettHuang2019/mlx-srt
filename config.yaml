@@ -1,5 +1,8 @@
 whisper:
-  model_path: "mlx-community/whisper-large-v3-asr-8bit"
+  model_path: "mlx-community/whisper-large-v3-turbo-asr-4bit"
+  fallback_model_paths:
+    - "mlx-community/whisper-large-v3-asr-4bit"
+  min_punctuation_ratio: 0.005
   initial_prompt: null
   language: "french"
 

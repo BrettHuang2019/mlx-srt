@@ -3,6 +3,7 @@ from src.transcription.whisper_transcriber import transcribe_audio
 from src.transcription import whisper_transcriber
 import os
 import json
+from types import SimpleNamespace
 
 
 class TestWhisperTranscription:
@@ -140,3 +141,105 @@ def test_patch_mlx_whisper_loader_filters_unknown_model_config_keys(tmp_path, mo
     assert captured["model_args"].n_mels == 128
     assert captured["model_args"].n_text_layer == 32
     assert not hasattr(captured["model_args"], "activation_dropout")
+
+
+def test_calculate_punctuation_ratio():
+    ratio = whisper_transcriber._calculate_punctuation_ratio("Bonjour, monde!")
+    assert ratio == pytest.approx(2 / 15)
+
+
+def test_transcribe_audio_falls_back_on_low_punctuation(tmp_path, monkeypatch):
+    audio_file = tmp_path / "sample.wav"
+    audio_file.write_text("stub", encoding="utf-8")
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+whisper:
+  model_path: "primary-model"
+  fallback_model_paths:
+    - "fallback-model"
+  min_punctuation_ratio: 0.05
+  language: "french"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_transcribe(speech_file, path_or_hf_repo, **kwargs):
+        calls.append((speech_file, path_or_hf_repo, kwargs))
+        if path_or_hf_repo == "primary-model":
+            return {
+                "text": "bonjour tout le monde",
+                "segments": [
+                    {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+                ],
+            }
+
+        return {
+            "text": "Bonjour tout le monde.",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": "Bonjour tout le monde."}
+            ],
+        }
+
+    monkeypatch.setattr(whisper_transcriber, "MLX_WHISPER_AVAILABLE", True)
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "mlx_whisper",
+        SimpleNamespace(transcribe=fake_transcribe),
+        raising=False,
+    )
+
+    result = transcribe_audio(str(audio_file), str(config_file))
+
+    assert [call[1] for call in calls] == ["primary-model", "fallback-model"]
+    assert result["text"] == "Bonjour tout le monde."
+    assert result["segments"][0]["text"] == "Bonjour tout le monde."
+
+
+def test_transcribe_audio_returns_best_result_when_all_models_are_low_punctuation(tmp_path, monkeypatch):
+    audio_file = tmp_path / "sample.wav"
+    audio_file.write_text("stub", encoding="utf-8")
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+whisper:
+  model_path:
+    - "primary-model"
+    - "fallback-model"
+  min_punctuation_ratio: 0.20
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    def fake_transcribe(speech_file, path_or_hf_repo, **kwargs):
+        results = {
+            "primary-model": {
+                "text": "bonjour tout le monde",
+                "segments": [
+                    {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+                ],
+            },
+            "fallback-model": {
+                "text": "Bonjour tout le monde.",
+                "segments": [
+                    {"id": 0, "start": 0.0, "end": 1.0, "text": "Bonjour tout le monde."}
+                ],
+            },
+        }
+        return results[path_or_hf_repo]
+
+    monkeypatch.setattr(whisper_transcriber, "MLX_WHISPER_AVAILABLE", True)
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "mlx_whisper",
+        SimpleNamespace(transcribe=fake_transcribe),
+        raising=False,
+    )
+
+    result = transcribe_audio(str(audio_file), str(config_file))
+
+    assert result["text"] == "Bonjour tout le monde."
