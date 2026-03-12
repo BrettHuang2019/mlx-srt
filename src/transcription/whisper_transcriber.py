@@ -1,6 +1,5 @@
 import json
 import os
-import string
 from dataclasses import fields
 from pathlib import Path
 
@@ -96,7 +95,7 @@ def _patch_mlx_whisper_loader():
 _patch_mlx_whisper_loader()
 
 
-PUNCTUATION_CHARS = set(string.punctuation) | set("，。！？；：、…“”‘’《》【】（）")
+PUNCTUATION_CHARS = {"."}
 
 
 def load_config(config_path="config.yaml"):
@@ -234,6 +233,7 @@ def transcribe_audio(speech_file, config_path="config.yaml"):
 
         clean_result = _clean_transcription_result(result)
         punctuation_ratio = _calculate_punctuation_ratio(clean_result["text"])
+        print(f"Whisper transcription with model '{model_path}' produced punctuation ratio {punctuation_ratio:.4f}.")
 
         if punctuation_ratio > best_ratio:
             best_ratio = punctuation_ratio

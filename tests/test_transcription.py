@@ -144,8 +144,8 @@ def test_patch_mlx_whisper_loader_filters_unknown_model_config_keys(tmp_path, mo
 
 
 def test_calculate_punctuation_ratio():
-    ratio = whisper_transcriber._calculate_punctuation_ratio("Bonjour, monde!")
-    assert ratio == pytest.approx(2 / 15)
+    ratio = whisper_transcriber._calculate_punctuation_ratio("Bonjour monde.")
+    assert ratio == pytest.approx(1 / 13)
 
 
 def test_transcribe_audio_falls_back_on_low_punctuation(tmp_path, monkeypatch):
