@@ -15,6 +15,7 @@ system:
 
 translation:
   summary:
+    enabled: false
     model_path: "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     prompt: "用中文简短总结以下内容(150字以内)： {text}"
     chunk_prompt: "用中文简短总结以下这部分转录内容，保留关键人物、事件和上下文线索(150字以内)： {text}"

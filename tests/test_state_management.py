@@ -19,8 +19,9 @@ from translation.translate import (
     update_step_status, update_batch_status,
     get_resume_point, validate_completed_files,
     prepare_state_for_resume, load_cached_batch_translation,
-    process_batch_recursive
+    process_batch_recursive, sync_state_with_config
 )
+import translation.translate as translate_module
 
 
 def test_state_management():
@@ -258,8 +259,36 @@ def test_process_batch_recursive_resumes_from_split_children(monkeypatch):
             {"index": 4, "zh": "回头见"},
         ]
         assert calls == [(f"{batch_id}_b", [3, 4])]
-
         print("✓ Recursive resume reuses completed split children")
+
+
+def test_create_initial_state_marks_summary_skipped_when_disabled(monkeypatch):
+    monkeypatch.setattr(
+        translate_module,
+        "load_config",
+        lambda: {"translation": {"summary": {"enabled": False}}},
+    )
+
+    state = create_initial_state("test_transcript.json", "/tmp/test-output")
+
+    assert state["steps"]["summary"]["status"] == "skipped"
+    assert state["steps"]["summary"]["enabled"] is False
+
+
+def test_sync_state_with_config_removes_completed_summary_when_disabled():
+    state = {
+        "completed_steps": ["refinement", "summary"],
+        "steps": {
+            "refinement": {"status": "completed", "file": "01_refined_transcript.json"},
+            "summary": {"status": "completed", "file": "04_summary.txt"},
+        },
+    }
+
+    synced = sync_state_with_config(state, {"translation": {"summary": {"enabled": False}}})
+
+    assert synced["steps"]["summary"]["status"] == "skipped"
+    assert synced["steps"]["summary"]["enabled"] is False
+    assert "summary" not in synced["completed_steps"]
 
 
 if __name__ == "__main__":

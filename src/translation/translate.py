@@ -40,6 +40,8 @@ def prepare_state_for_resume(state: Dict[str, Any]) -> Dict[str, Any]:
     if not state:
         return state
 
+    state = sync_state_with_config(state)
+
     pipeline_info = state.setdefault("pipeline_info", {})
     pipeline_info["status"] = "running"
     pipeline_info["last_checkpoint"] = datetime.now().isoformat()
@@ -48,9 +50,35 @@ def prepare_state_for_resume(state: Dict[str, Any]) -> Dict[str, Any]:
 
     return state
 
+
+def sync_state_with_config(state: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Align persisted step state with current configuration toggles."""
+    if not state:
+        return state
+
+    summary_enabled = is_summary_enabled(config)
+    steps = state.setdefault("steps", {})
+    summary_step = steps.setdefault("summary", {"file": "04_summary.txt"})
+    summary_step["enabled"] = summary_enabled
+
+    if summary_enabled:
+        if summary_step.get("status") == "skipped":
+            summary_step["status"] = "pending"
+    else:
+        summary_step["status"] = "skipped"
+        if "summary" in state.get("completed_steps", []):
+            state["completed_steps"] = [
+                step_name for step_name in state["completed_steps"] if step_name != "summary"
+            ]
+
+    return state
+
 def create_initial_state(whisper_transcript: str, output_dir: str, url: str = None, downloaded_file: str = None, video_title: str = None) -> Dict[str, Any]:
     """Create initial state structure for a new translation pipeline"""
     import uuid
+    config = load_config()
+    summary_enabled = is_summary_enabled(config)
+
     state = {
         "pipeline_info": {
             "pipeline_id": f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
@@ -66,7 +94,11 @@ def create_initial_state(whisper_transcript: str, output_dir: str, url: str = No
         "current_step": None,
         "steps": {
             "refinement": {"status": "pending", "file": "01_refined_transcript.json"},
-            "summary": {"status": "pending", "file": "04_summary.txt"},
+            "summary": {
+                "status": "pending" if summary_enabled else "skipped",
+                "file": "04_summary.txt",
+                "enabled": summary_enabled,
+            },
             "preprocessing": {"status": "pending", "files": ["02_filtered_segments.json", "03_ordered_segments.json", "03b_regenerated_ids_segments.json"]},
             "translation": {
                 "status": "pending",
@@ -273,6 +305,9 @@ def get_resume_point(state: Dict[str, Any], output_dir: str) -> Optional[str]:
 
         elif step_status in ["failed", "running"]:
             return step  # Resume from failed or running step
+
+        elif step_status == "skipped":
+            continue
 
         elif step_status == "pending":
             return step  # Start this step
@@ -488,6 +523,9 @@ def get_summary_config(config: Dict[str, Any]) -> Dict[str, Any]:
     translation_config = config.get('translation', {})
     summary_config = translation_config.get('summary', {}).copy()
 
+    if 'enabled' not in summary_config:
+        summary_config['enabled'] = translation_config.get('summary_enabled', True)
+
     if 'model_path' not in summary_config:
         summary_config['model_path'] = translation_config.get(
             'summary_model_path',
@@ -514,6 +552,13 @@ def get_summary_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return summary_config
 
 
+def is_summary_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether transcript summarization is enabled for translation."""
+    if config is None:
+        config = load_config()
+    return get_summary_config(config).get('enabled', True)
+
+
 def get_translation_step_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Return translation-step config, supporting both nested and legacy flat keys."""
     translation_config = config.get('translation', {})
@@ -535,6 +580,29 @@ def get_translation_step_config(config: Dict[str, Any]) -> Dict[str, Any]:
             step_config[key] = translation_config.get(key, default)
 
     return step_config
+
+
+def build_translation_prompt(
+    translation_prompt: str,
+    summary: str,
+    context_text: str,
+    segments_json: str,
+    summary_enabled: bool,
+) -> str:
+    """Render the translation prompt, removing the summary block when disabled."""
+    prompt = translation_prompt
+    if summary_enabled:
+        prompt = prompt.replace("{summary}", summary)
+    else:
+        prompt = re.sub(
+            r"\n[ \t]*全文总结（仅供理解）：\n[ \t]*\{summary\}\n?",
+            "\n",
+            prompt,
+        )
+        prompt = prompt.replace("{summary}", "")
+
+    prompt = prompt.replace("{context}", context_text).replace("{segments}", segments_json)
+    return prompt
 
 def _fallback_summary(text: str) -> str:
     return f"这是一个关于文稿的总结。原文总长度：{len(text)}字符。"
@@ -1084,8 +1152,16 @@ def process_single_batch_with_retries(segments: List[Dict[str, Any]], summary: s
     # Convert batch segments to JSON
     segments_json = json.dumps(segments, ensure_ascii=False, indent=2)
 
+    config = load_config()
+
     # Create prompt for this batch
-    prompt = translation_prompt.replace("{summary}", summary).replace("{context}", batch_context_text).replace("{segments}", segments_json)
+    prompt = build_translation_prompt(
+        translation_prompt,
+        summary,
+        batch_context_text,
+        segments_json,
+        is_summary_enabled(config),
+    )
 
     # Prepare messages for LLM
     messages = [{"role": "user", "content": prompt}]
@@ -1157,6 +1233,7 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
     """
     config = load_config()
     translation_config = get_translation_step_config(config)
+    summary_enabled = is_summary_enabled(config)
 
     # Extract configuration parameters
     model_path = translation_config.get('model_path', 'mlx-community/Qwen2.5-7B-Instruct-4bit')
@@ -1180,8 +1257,12 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
         # Save summary with context
         context_file = output_path / "05_translation_context.txt"
         with open(context_file, 'w', encoding='utf-8') as f:
-            f.write("=== Translation Context (Summary) ===\n")
-            f.write(summary)
+            f.write("=== Translation Context ===\n")
+            f.write(f"Summary Enabled: {summary_enabled}\n")
+            if summary_enabled:
+                f.write(summary)
+            else:
+                f.write("(summary disabled)\n")
             f.write(f"\n\n=== Configuration ===\n")
             f.write(f"Model Path: {model_path}\n")
             f.write(f"Batch Size: {batch_size}\n")
@@ -1260,7 +1341,13 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
         segments_json = json.dumps(batch_segments, ensure_ascii=False, indent=2)
 
         # Replace placeholders in the prompt template
-        prompt = translation_prompt.replace("{summary}", summary).replace("{context}", context_text).replace("{segments}", segments_json)
+        prompt = build_translation_prompt(
+            translation_prompt,
+            summary,
+            context_text,
+            segments_json,
+            summary_enabled,
+        )
 
         # Create comprehensive batch report
         if output_dir:
@@ -1277,7 +1364,10 @@ def batch_translate(segments: List[Dict[str, Any]], summary: str,
                 f.write(f"Verbose Mode: {verbose}\n\n")
 
                 f.write("=== INPUT SUMMARY ===\n")
-                f.write(f"Context Summary: {summary}\n\n")
+                if summary_enabled:
+                    f.write(f"Context Summary: {summary}\n\n")
+                else:
+                    f.write("Context Summary: (summary disabled)\n\n")
 
                 f.write("=== PREVIOUS CONTEXT (French) ===\n")
                 if context_segments:
@@ -1478,10 +1568,16 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
         original_transcript = json.load(f)
 
     segments = original_transcript.get('segments', [])
+    config = load_config()
+    summary_enabled = is_summary_enabled(config)
 
     # Step 1: Generate summary
-    print("Step 1: Generating summary...")
-    summary, _ = summarize(transcript_file, output_dir, return_metadata=True)
+    summary = ""
+    if summary_enabled:
+        print("Step 1: Generating summary...")
+        summary, _ = summarize(transcript_file, output_dir, return_metadata=True)
+    else:
+        print("Step 1: Skipping summary (disabled in config)")
 
     # Step 2: Preprocess segments for translation
     print("Step 2: Preprocessing segments...")
@@ -1547,8 +1643,9 @@ def translate_transcript(transcript_file: str, output_dir: Optional[str] = None)
         f.write("01_converted_segments.json - Segments converted to LLM format\n")
         f.write("02_filtered_segments.json - Segments after filtering empty content\n")
         f.write("03_ordered_segments.json - Segments ordered by ID\n")
-        f.write("04_summary.txt - Generated summary of the transcript\n")
-        f.write("04_summary_map_reduce.json - Chunking and reduce-pass metadata for summary generation\n")
+        if summary_enabled:
+            f.write("04_summary.txt - Generated summary of the transcript\n")
+            f.write("04_summary_map_reduce.json - Chunking and reduce-pass metadata for summary generation\n")
         f.write("05_translation_context.txt - Summary and segments sent for translation\n")
         f.write("06_translation_prompt.txt - Full prompt sent to LLM\n")
         f.write("07_llm_raw_response.json - Raw response from LLM (JSON format)\n")
@@ -1701,30 +1798,40 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         print(f"  - Segments split: {stats.get('segments_split', 'N/A')}")
         print(f"  - Punctuation fixes: {stats.get('punctuation_fixed', 'N/A')}")
 
-    # Step 2: Generate summary
-    if resume and resume_point not in ["refinement", "summary"]:
-        print("\nStep 2: Skipping summary generation (already completed)")
-        # Load summary
-        summary_file = output_path / "04_summary.txt"
-        with open(summary_file, 'r', encoding='utf-8') as f:
-            summary = f.read()
-    else:
-        print("\nStep 2: Generating summary...")
-        update_step_status(state, "summary", "running")
-        save_state(state, output_dir)
+    config = load_config()
+    summary_enabled = is_summary_enabled(config)
+    summary = ""
 
-        summary, summary_details = summarize(str(refined_file), output_dir, return_metadata=True)
-        update_step_status(
-            state,
-            "summary",
-            "completed",
-            strategy=summary_details.get("strategy"),
-            chunk_count=summary_details.get("chunk_count"),
-            reduce_passes=summary_details.get("reduce_passes"),
-            input_tokens=summary_details.get("full_text_token_count"),
-            output_tokens=summary_details.get("final_summary_token_count"),
-        )
-        save_state(state, output_dir)
+    # Step 2: Generate summary
+    if summary_enabled:
+        if resume and resume_point not in ["refinement", "summary"]:
+            print("\nStep 2: Skipping summary generation (already completed)")
+            summary_file = output_path / "04_summary.txt"
+            with open(summary_file, 'r', encoding='utf-8') as f:
+                summary = f.read()
+        else:
+            print("\nStep 2: Generating summary...")
+            update_step_status(state, "summary", "running")
+            save_state(state, output_dir)
+
+            summary, summary_details = summarize(str(refined_file), output_dir, return_metadata=True)
+            update_step_status(
+                state,
+                "summary",
+                "completed",
+                strategy=summary_details.get("strategy"),
+                chunk_count=summary_details.get("chunk_count"),
+                reduce_passes=summary_details.get("reduce_passes"),
+                input_tokens=summary_details.get("full_text_token_count"),
+                output_tokens=summary_details.get("final_summary_token_count"),
+            )
+            save_state(state, output_dir)
+    else:
+        print("\nStep 2: Skipping summary generation (disabled in config)")
+        if state["steps"]["summary"]["status"] != "skipped":
+            state["steps"]["summary"]["status"] = "skipped"
+            state["steps"]["summary"]["enabled"] = False
+            save_state(state, output_dir)
 
     # Step 3: Preprocess refined segments for translation
     if resume and resume_point not in ["refinement", "summary", "preprocessing"]:
@@ -1852,11 +1959,14 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         f.write("   - Split long blocks\n")
         f.write("2. Summary Generation\n")
         summary_state = state["steps"].get("summary", {})
-        f.write(f"   - Strategy: {summary_state.get('strategy', 'unknown')}\n")
-        if summary_state.get("chunk_count") is not None:
-            f.write(f"   - Chunks: {summary_state.get('chunk_count')}\n")
-        if summary_state.get("reduce_passes") is not None:
-            f.write(f"   - Reduce passes: {summary_state.get('reduce_passes')}\n")
+        if summary_enabled:
+            f.write(f"   - Strategy: {summary_state.get('strategy', 'unknown')}\n")
+            if summary_state.get("chunk_count") is not None:
+                f.write(f"   - Chunks: {summary_state.get('chunk_count')}\n")
+            if summary_state.get("reduce_passes") is not None:
+                f.write(f"   - Reduce passes: {summary_state.get('reduce_passes')}\n")
+        else:
+            f.write("   - Disabled by configuration\n")
         f.write("3. LLM Translation\n")
         f.write("4. Merging Translations\n\n")
 

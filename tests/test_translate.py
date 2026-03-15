@@ -21,6 +21,8 @@ from translation.translate import (
     batch_translate,
     translate_transcript,
     get_summary_config,
+    is_summary_enabled,
+    build_translation_prompt,
     load_config,
     translation_pipeline,
     sanitize_model_output,
@@ -139,6 +141,54 @@ def test_get_summary_config_defaults_thinking_off():
     summary_config = get_summary_config({"translation": {}})
 
     assert summary_config["enable_thinking"] is False
+
+
+def test_is_summary_enabled_defaults_true():
+    assert is_summary_enabled({"translation": {}}) is True
+
+
+def test_build_translation_prompt_removes_summary_block_when_disabled():
+    prompt = """规则
+
+全文总结（仅供理解）：
+{summary}
+
+前文提要：
+{context}
+
+待处理字幕：
+{segments}
+"""
+    rendered = build_translation_prompt(
+        prompt,
+        "ignored summary",
+        "prev context",
+        '[{"index": 1, "fr": "Bonjour"}]',
+        False,
+    )
+
+    assert "全文总结（仅供理解）" not in rendered
+    assert "{summary}" not in rendered
+    assert "prev context" in rendered
+
+
+def test_build_translation_prompt_keeps_summary_block_when_enabled():
+    prompt = """全文总结（仅供理解）：
+{summary}
+
+前文提要：
+{context}
+"""
+    rendered = build_translation_prompt(
+        prompt,
+        "有效总结",
+        "上下文",
+        "[]",
+        True,
+    )
+
+    assert "全文总结（仅供理解）" in rendered
+    assert "有效总结" in rendered
 
 
 def test_summarize_uses_map_reduce_for_long_transcripts(monkeypatch, tmp_path):
