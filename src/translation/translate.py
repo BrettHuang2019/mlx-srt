@@ -1569,7 +1569,8 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
                         resume: bool = False,
                         url: str = None,
                         downloaded_file: str = None,
-                        video_title: str = None) -> Dict[str, Any]:
+                        video_title: str = None,
+                        transcription_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Complete pipeline from Whisper transcription to translated transcript.
 
@@ -1823,6 +1824,27 @@ def translation_pipeline(whisper_transcript: Dict[str, Any],
         f.write(f"Output: Translated transcript with Chinese translations\n\n")
 
         f.write("Pipeline Steps:\n")
+        if transcription_metadata:
+            f.write("0. Transcription\n")
+            f.write(
+                f"   - Strategy: {transcription_metadata.get('selected_strategy', 'unknown')}\n"
+            )
+            f.write(
+                f"   - Selected model: {transcription_metadata.get('selected_model_path', 'unknown')}\n"
+            )
+            f.write(
+                f"   - Final punctuation ratio: {transcription_metadata.get('final_punctuation_ratio', 0.0):.4f}\n"
+            )
+            f.write(
+                f"   - Threshold: {transcription_metadata.get('min_punctuation_ratio', 0.0):.4f}\n"
+            )
+            if transcription_metadata.get("punctuation_pass_applied"):
+                f.write(
+                    f"   - Punctuation model: {transcription_metadata.get('punctuation_model', 'unknown')}\n"
+                )
+                f.write(
+                    f"   - Punctuation chunks: {transcription_metadata.get('punctuation_chunk_count', 'unknown')}\n"
+                )
         f.write("1. Segment Refinement (segment_refiner.py)\n")
         f.write("   - Remove empty segments\n")
         f.write("   - Fix punctuation spacing\n")

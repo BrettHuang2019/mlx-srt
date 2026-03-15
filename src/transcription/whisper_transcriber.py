@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from dataclasses import fields
 from pathlib import Path
 
@@ -15,6 +16,12 @@ try:
     MLX_WHISPER_AVAILABLE = True
 except ImportError:
     MLX_WHISPER_AVAILABLE = False
+
+from transcription.punctuation_kredor import (
+    DEFAULT_PUNCTUATION_CONFIG,
+    apply_punctuation_to_payload as _apply_punctuation_to_payload_impl,
+    get_punctuation_runtime_config as _get_punctuation_runtime_config,
+)
 
 
 def _patch_mlx_whisper_loader():
@@ -95,7 +102,16 @@ def _patch_mlx_whisper_loader():
 _patch_mlx_whisper_loader()
 
 
-PUNCTUATION_CHARS = {"."}
+PUNCTUATION_CHARS = {".", "!", "?", "…"}
+
+
+class TranscriptionPipelineError(RuntimeError):
+    """Raised when transcription fails after collecting diagnostic metadata."""
+
+    def __init__(self, message, metadata=None, partial_result=None):
+        super().__init__(message)
+        self.metadata = metadata or {}
+        self.partial_result = partial_result
 
 
 def load_config(config_path="config.yaml"):
@@ -113,10 +129,10 @@ def load_config(config_path="config.yaml"):
         return {
             "whisper": {
                 "model_path": "models/large",
-                "fallback_model_paths": [],
                 "initial_prompt": None,
                 "language": "french",
-                "min_punctuation_ratio": 0.005,
+                "min_punctuation_ratio": 0.01,
+                "punctuation": DEFAULT_PUNCTUATION_CONFIG.copy(),
             }
         }
 
@@ -124,29 +140,6 @@ def load_config(config_path="config.yaml"):
         config = yaml.safe_load(f)
 
     return config
-
-
-def _resolve_model_paths(whisper_config):
-    model_path = whisper_config.get("model_path", "models/large")
-    fallback_model_paths = whisper_config.get("fallback_model_paths", [])
-
-    if isinstance(model_path, (list, tuple)):
-        candidate_paths = list(model_path)
-    else:
-        candidate_paths = [model_path]
-
-    if fallback_model_paths:
-        candidate_paths.extend(fallback_model_paths)
-
-    deduped_paths = []
-    seen = set()
-    for path in candidate_paths:
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        deduped_paths.append(path)
-
-    return deduped_paths or ["models/large"]
 
 
 def _calculate_punctuation_ratio(text):
@@ -157,7 +150,8 @@ def _calculate_punctuation_ratio(text):
     if not non_whitespace_chars:
         return 0.0
 
-    punctuation_count = sum(1 for char in non_whitespace_chars if char in PUNCTUATION_CHARS)
+    collapsed_text = re.sub(r"\.\.\.|…", "…", "".join(non_whitespace_chars))
+    punctuation_count = sum(1 for char in collapsed_text if char in PUNCTUATION_CHARS)
     return punctuation_count / len(non_whitespace_chars)
 
 
@@ -178,7 +172,15 @@ def _clean_transcription_result(result):
     }
 
 
-def transcribe_audio(speech_file, config_path="config.yaml"):
+def _apply_punctuation_step(base_result, punctuation_config):
+    return _apply_punctuation_to_payload_impl(
+        base_result,
+        punctuation_config,
+        _calculate_punctuation_ratio,
+    )
+
+
+def transcribe_audio(speech_file, config_path="config.yaml", return_metadata=False):
     """
     Transcribe audio file using mlx_whisper
 
@@ -197,8 +199,10 @@ def transcribe_audio(speech_file, config_path="config.yaml"):
 
     config = load_config(config_path)
     whisper_config = config.get("whisper", {})
-    model_paths = _resolve_model_paths(whisper_config)
-    min_punctuation_ratio = whisper_config.get("min_punctuation_ratio", 0.005)
+    model_path = whisper_config.get("model_path", "models/large")
+    if isinstance(model_path, (list, tuple)):
+        model_path = next((path for path in model_path if path), "models/large")
+    min_punctuation_ratio = whisper_config.get("min_punctuation_ratio", 0.01)
 
     # Prepare whisper parameters
     whisper_params = {}
@@ -214,44 +218,157 @@ def transcribe_audio(speech_file, config_path="config.yaml"):
         whisper_params["initial_prompt"] = initial_prompt
 
     last_error = None
-    best_result = None
-    best_ratio = -1.0
+    last_successful_result = None
+    last_successful_ratio = None
+    attempt_details = []
 
-    for index, model_path in enumerate(model_paths):
-        try:
-            result = mlx_whisper.transcribe(
-                speech_file,
-                path_or_hf_repo=model_path,
-                **whisper_params,
-            )
-        except Exception as exc:
-            last_error = exc
-            if index == len(model_paths) - 1:
-                raise
-            print(f"Whisper transcription failed with model '{model_path}': {exc}. Trying fallback model.")
-            continue
+    print(f"🎯 Punctuation threshold: {min_punctuation_ratio:.4f}")
 
+    def build_failure_metadata(error_message):
+        metadata = {
+            "selected_strategy": "failed",
+            "selected_model_path": None,
+            "final_punctuation_ratio": last_successful_ratio or 0.0,
+            "min_punctuation_ratio": min_punctuation_ratio,
+            "punctuation_pass_applied": False,
+            "status": "failed",
+            "error": error_message,
+            "attempts": list(attempt_details),
+        }
+        if last_successful_ratio is not None:
+            metadata["source_whisper_punctuation_ratio"] = last_successful_ratio
+        return metadata
+
+    print(f"🤖 Whisper attempt 1/1: {model_path}")
+    try:
+        result = mlx_whisper.transcribe(
+            speech_file,
+            path_or_hf_repo=model_path,
+            **whisper_params,
+        )
+    except Exception as exc:
+        last_error = exc
+        attempt_details.append(
+            {
+                "type": "whisper",
+                "model_path": model_path,
+                "status": "failed",
+                "error": str(exc),
+            }
+        )
+        print(f"❌ Whisper failed: {exc}")
+
+    if last_error is None:
         clean_result = _clean_transcription_result(result)
         punctuation_ratio = _calculate_punctuation_ratio(clean_result["text"])
-        print(f"Whisper transcription with model '{model_path}' produced punctuation ratio {punctuation_ratio:.4f}.")
+        last_successful_result = clean_result
+        last_successful_ratio = punctuation_ratio
+        attempt_details.append(
+            {
+                "type": "whisper",
+                "model_path": model_path,
+                "status": "completed",
+                "punctuation_ratio": punctuation_ratio,
+                "response": clean_result,
+            }
+        )
+        meets_threshold = punctuation_ratio >= min_punctuation_ratio
+        print(
+            f"📊 Punctuation ratio: {punctuation_ratio:.4f} "
+            f"(threshold {min_punctuation_ratio:.4f})"
+        )
+        print("✅ Meets threshold: yes" if meets_threshold else "⚠️ Meets threshold: no")
 
-        if punctuation_ratio > best_ratio:
-            best_ratio = punctuation_ratio
-            best_result = clean_result
+        if meets_threshold:
+            print("➡️ Next step: accept this Whisper result and continue.")
+            metadata = {
+                "selected_strategy": "whisper",
+                "selected_model_path": model_path,
+                "final_punctuation_ratio": punctuation_ratio,
+                "min_punctuation_ratio": min_punctuation_ratio,
+                "punctuation_pass_applied": False,
+                "attempts": attempt_details,
+            }
+            return (clean_result, metadata) if return_metadata else clean_result
 
-        if punctuation_ratio >= min_punctuation_ratio:
-            return clean_result
-
-        if index < len(model_paths) - 1:
-            print(
-                f"Whisper transcription with model '{model_path}' had low punctuation ratio "
-                f"({punctuation_ratio:.4f} < {min_punctuation_ratio:.4f}). Trying fallback model."
+        punctuation_config = _get_punctuation_runtime_config(whisper_config)
+        print("📝 Whisper output stayed below the punctuation threshold.")
+        print(
+            f"➡️ Next step: run punctuation step with "
+            f"'{punctuation_config['model_path']}'."
+        )
+        try:
+            punctuated_result, punctuation_metadata = _apply_punctuation_step(
+                last_successful_result,
+                punctuation_config,
             )
-
-    if best_result is not None:
-        return best_result
+        except Exception as exc:
+            error_details = getattr(exc, "details", None)
+            attempt_details.append(
+                {
+                    "type": "punctuation",
+                    "model_path": punctuation_config["model_path"],
+                    "status": "failed",
+                    "input_punctuation_ratio": _calculate_punctuation_ratio(
+                        last_successful_result["text"]
+                    ),
+                    "error": str(exc),
+                    "error_details": error_details,
+                }
+            )
+            failure_metadata = build_failure_metadata(str(exc))
+            if error_details:
+                failure_metadata["error_details"] = error_details
+            print("❌ Punctuation step failed.")
+            print("➡️ Next step: save the raw Whisper transcript and stop the pipeline.")
+            raise TranscriptionPipelineError(
+                str(exc),
+                metadata=failure_metadata,
+                partial_result=last_successful_result,
+            ) from exc
+        final_ratio = punctuation_metadata["output_punctuation_ratio"]
+        attempt_details.append(
+            {
+                "type": "punctuation",
+                "model_path": punctuation_metadata["model_path"],
+                "status": "completed",
+                "chunk_count": punctuation_metadata["chunk_count"],
+                "chunk_words": punctuation_metadata["chunk_words"],
+                "input_punctuation_ratio": punctuation_metadata["input_punctuation_ratio"],
+                "output_punctuation_ratio": final_ratio,
+                "mapping_stats": punctuation_metadata["mapping_stats"],
+                "punctuation_summary": punctuation_metadata["punctuation_summary"],
+                "response": punctuated_result,
+            }
+        )
+        print(
+            f"📊 Punctuation step ratio: {final_ratio:.4f} "
+            f"(input {punctuation_metadata['input_punctuation_ratio']:.4f}, "
+            f"threshold {min_punctuation_ratio:.4f})"
+        )
+        print("✅ Meets threshold: yes" if final_ratio >= min_punctuation_ratio else "⚠️ Meets threshold: no")
+        print("➡️ Next step: use the punctuated transcript and continue.")
+        metadata = {
+            "selected_strategy": "punctuation",
+            "selected_model_path": punctuation_metadata["model_path"],
+            "source_whisper_punctuation_ratio": last_successful_ratio,
+            "final_punctuation_ratio": final_ratio,
+            "min_punctuation_ratio": min_punctuation_ratio,
+            "punctuation_pass_applied": True,
+            "punctuation_model": punctuation_metadata["model_path"],
+            "punctuation_chunk_count": punctuation_metadata["chunk_count"],
+            "punctuation_chunk_words": punctuation_metadata["chunk_words"],
+            "punctuation_mapping_stats": punctuation_metadata["mapping_stats"],
+            "punctuation_summary": punctuation_metadata["punctuation_summary"],
+            "attempts": attempt_details,
+        }
+        return (punctuated_result, metadata) if return_metadata else punctuated_result
 
     if last_error is not None:
-        raise last_error
+        print("❌ Transcription failed before any usable Whisper transcript was produced.")
+        raise TranscriptionPipelineError(
+            str(last_error),
+            metadata=build_failure_metadata(str(last_error)),
+        ) from last_error
 
     raise RuntimeError("Whisper transcription failed without producing a result.")

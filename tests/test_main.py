@@ -11,7 +11,8 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from main import main
+from main import main, process_audio_file, save_transcription_report
+from transcription.whisper_transcriber import TranscriptionPipelineError
 
 
 class TestMainOrchestration:
@@ -224,56 +225,228 @@ class TestMainOrchestration:
 
         print("✅ Video file pipeline test PASSED")
 
-    def test_main_orchestration_consistency(self):
-        """
-        Test that both audio and video pipelines produce consistent output structure
-        when using main.py orchestration script.
-        """
-        print("\n=== TESTING MAIN ORCHESTRATION CONSISTENCY ===")
 
-        # Expected output files from previous tests
-        audio_json_path = os.path.join(os.path.dirname(__file__), 'audio', 'Test1_translated.json')
-        video_json_path = os.path.join(os.path.dirname(__file__), 'video', 'Test_video_1_translated.json')
+def test_save_transcription_report_writes_failure_report(tmp_path):
+    metadata = {
+        "selected_strategy": "failed",
+        "selected_model_path": "kredor/punctuate-all",
+        "final_punctuation_ratio": 0.0026,
+        "min_punctuation_ratio": 0.01,
+        "punctuation_pass_applied": False,
+        "error_details": {
+            "stage": "segment_mapping",
+            "segment_id": 7,
+            "matched_words": 2,
+            "original_segment_word_count": 5,
+        },
+        "attempts": [
+            {
+                "type": "whisper",
+                "model_path": "mlx-community/whisper-large-v3-asr-4bit",
+                "status": "completed",
+                "punctuation_ratio": 0.0026,
+                "response": {
+                    "text": "bonjour tout le monde",
+                    "segments": [
+                        {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+                    ],
+                },
+            },
+            {
+                "type": "punctuation",
+                "model_path": "kredor/punctuate-all",
+                "status": "failed",
+                "input_punctuation_ratio": 0.0026,
+                "error": "Failed to map punctuated text back onto transcription segments.",
+                "error_details": {
+                    "stage": "segment_mapping",
+                    "segment_id": 7,
+                    "matched_words": 2,
+                    "original_segment_word_count": 5,
+                },
+            },
+        ],
+    }
 
-        # Skip test if previous tests haven't run
-        if not os.path.exists(audio_json_path):
-            pytest.skip("Audio pipeline output not found - run test_audio_file_complete_pipeline first")
-        if not os.path.exists(video_json_path):
-            pytest.skip("Video pipeline output not found - run test_video_file_complete_pipeline first")
+    save_transcription_report(
+        str(tmp_path),
+        metadata,
+        error_message="Failed to map punctuated text back onto transcription segments.",
+    )
 
-        # Load both transcripts
-        with open(audio_json_path, 'r', encoding='utf-8') as f:
-            audio_transcript = json.load(f)
-        with open(video_json_path, 'r', encoding='utf-8') as f:
-            video_transcript = json.load(f)
+    metadata_file = tmp_path / "00_transcription_metadata.json"
+    report_file = tmp_path / "00_transcription_report.txt"
+    response_file = tmp_path / "00_transcription_attempt_01_whisper.json"
 
-        # Validate consistent structure
-        for name, transcript in [("audio", audio_transcript), ("video", video_transcript)]:
-            assert 'segments' in transcript, f"{name} transcript missing 'segments' field"
-            assert 'text' in transcript, f"{name} transcript missing 'text' field"
-            assert len(transcript['segments']) > 0, f"{name} transcript has no segments"
+    assert metadata_file.exists()
+    assert report_file.exists()
+    assert response_file.exists()
 
-            # Check that segments have consistent structure
-            for segment in transcript['segments'][:5]:  # Check first 5 segments
-                assert 'id' in segment, f"{name} segment missing 'id' field"
-                assert 'start' in segment, f"{name} segment missing 'start' field"
-                assert 'end' in segment, f"{name} segment missing 'end' field"
-                assert 'text' in segment, f"{name} segment missing 'text' field"
+    saved_metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    report_text = report_file.read_text(encoding="utf-8")
+    saved_response = json.loads(response_file.read_text(encoding="utf-8"))
 
-        print("✅ Structure consistency validated for both audio and video outputs")
+    assert saved_metadata["status"] == "failed"
+    assert saved_metadata["error"] == "Failed to map punctuated text back onto transcription segments."
+    assert saved_metadata["error_details"]["segment_id"] == 7
+    assert saved_metadata["attempts"][0]["response_file"] == "00_transcription_attempt_01_whisper.json"
+    assert "response" not in saved_metadata["attempts"][0]
+    assert saved_response["text"] == "bonjour tout le monde"
+    assert "Status: failed" in report_text
+    assert "Error: Failed to map punctuated text back onto transcription segments." in report_text
+    assert "Error details:" in report_text
+    assert "segment_id: 7" in report_text
+    assert "type=punctuation" in report_text
+    assert "matched_words=2" in report_text
+    assert "response_file=00_transcription_attempt_01_whisper.json" in report_text
 
-        # Check translation coverage
-        audio_zh_count = len([s for s in audio_transcript['segments'] if 'zh' in s and s['zh']])
-        video_zh_count = len([s for s in video_transcript['segments'] if 'zh' in s and s['zh']])
 
-        assert audio_zh_count > 0, "Audio transcript has no Chinese translations"
-        assert video_zh_count > 0, "Video transcript has no Chinese translations"
+def test_process_audio_file_writes_report_when_whisper_fails(tmp_path, monkeypatch):
+    audio_file = tmp_path / "input.wav"
+    audio_file.write_bytes(b"fake audio")
 
-        audio_coverage = audio_zh_count / len(audio_transcript['segments']) * 100
-        video_coverage = video_zh_count / len(video_transcript['segments']) * 100
+    failure_metadata = {
+        "selected_strategy": "failed",
+        "selected_model_path": None,
+        "final_punctuation_ratio": 0.0,
+        "min_punctuation_ratio": 0.01,
+        "punctuation_pass_applied": False,
+        "status": "failed",
+        "error": "model load failed",
+        "attempts": [
+            {
+                "type": "whisper",
+                "model_path": "broken-model",
+                "status": "failed",
+                "error": "model load failed",
+            }
+        ],
+    }
 
-        print(f"✅ Translation coverage validated:")
-        print(f"  - Audio: {audio_zh_count}/{len(audio_transcript['segments'])} ({audio_coverage:.1f}%)")
-        print(f"  - Video: {video_zh_count}/{len(video_transcript['segments'])} ({video_coverage:.1f}%)")
+    def fake_transcribe_audio(*args, **kwargs):
+        raise TranscriptionPipelineError("model load failed", metadata=failure_metadata)
 
-        print("✅ Main orchestration consistency test PASSED")
+    monkeypatch.setitem(process_audio_file.__globals__, "transcribe_audio", fake_transcribe_audio)
+
+    with pytest.raises(RuntimeError, match="Transcription failed: model load failed"):
+        process_audio_file(str(audio_file), str(tmp_path / "output"))
+
+    report_file = tmp_path / "output" / "00_transcription_report.txt"
+    metadata_file = tmp_path / "output" / "00_transcription_metadata.json"
+
+    assert report_file.exists()
+    assert metadata_file.exists()
+
+    report_text = report_file.read_text(encoding="utf-8")
+    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+
+    assert "Status: failed" in report_text
+    assert "Error: model load failed" in report_text
+    assert "type=whisper" in report_text
+    assert "model=broken-model" in report_text
+    assert metadata["attempts"][0]["status"] == "failed"
+
+
+def test_process_audio_file_saves_raw_transcript_when_punctuation_fails(tmp_path, monkeypatch):
+    audio_file = tmp_path / "input.wav"
+    audio_file.write_bytes(b"fake audio")
+    raw_result = {
+        "text": "bonjour tout le monde",
+        "segments": [
+            {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+        ],
+    }
+    failure_metadata = {
+        "selected_strategy": "failed",
+        "selected_model_path": None,
+        "final_punctuation_ratio": 0.0026,
+        "min_punctuation_ratio": 0.01,
+        "punctuation_pass_applied": False,
+        "status": "failed",
+        "error": "punctuation fallback failed",
+        "attempts": [
+            {
+                "type": "whisper",
+                "model_path": "fallback-model",
+                "status": "completed",
+                "punctuation_ratio": 0.0026,
+            },
+            {
+                "type": "punctuation",
+                "model_path": "punctuation-model",
+                "status": "failed",
+                "error": "punctuation fallback failed",
+            },
+        ],
+    }
+
+    def fake_transcribe_audio(*args, **kwargs):
+        raise TranscriptionPipelineError(
+            "punctuation fallback failed",
+            metadata=failure_metadata,
+            partial_result=raw_result,
+        )
+
+    monkeypatch.setitem(process_audio_file.__globals__, "transcribe_audio", fake_transcribe_audio)
+
+    with pytest.raises(RuntimeError, match="Transcription failed: punctuation fallback failed"):
+        process_audio_file(str(audio_file), str(tmp_path / "output"))
+
+    transcription_file = tmp_path / "output" / "00_whisper_transcription.json"
+    assert transcription_file.exists()
+    assert json.loads(transcription_file.read_text(encoding="utf-8")) == raw_result
+
+
+def test_main_orchestration_consistency():
+    """
+    Test that both audio and video pipelines produce consistent output structure
+    when using main.py orchestration script.
+    """
+    print("\n=== TESTING MAIN ORCHESTRATION CONSISTENCY ===")
+
+    # Expected output files from previous tests
+    audio_json_path = os.path.join(os.path.dirname(__file__), 'audio', 'Test1_translated.json')
+    video_json_path = os.path.join(os.path.dirname(__file__), 'video', 'Test_video_1_translated.json')
+
+    # Skip test if previous tests haven't run
+    if not os.path.exists(audio_json_path):
+        pytest.skip("Audio pipeline output not found - run test_audio_file_complete_pipeline first")
+    if not os.path.exists(video_json_path):
+        pytest.skip("Video pipeline output not found - run test_video_file_complete_pipeline first")
+
+    # Load both transcripts
+    with open(audio_json_path, 'r', encoding='utf-8') as f:
+        audio_transcript = json.load(f)
+    with open(video_json_path, 'r', encoding='utf-8') as f:
+        video_transcript = json.load(f)
+
+    # Validate consistent structure
+    for name, transcript in [("audio", audio_transcript), ("video", video_transcript)]:
+        assert 'segments' in transcript, f"{name} transcript missing 'segments' field"
+        assert 'text' in transcript, f"{name} transcript missing 'text' field"
+        assert len(transcript['segments']) > 0, f"{name} transcript has no segments"
+
+        # Check that segments have consistent structure
+        for segment in transcript['segments'][:5]:  # Check first 5 segments
+            assert 'id' in segment, f"{name} segment missing 'id' field"
+            assert 'start' in segment, f"{name} segment missing 'start' field"
+            assert 'end' in segment, f"{name} segment missing 'end' field"
+            assert 'text' in segment, f"{name} segment missing 'text' field"
+
+    print("✅ Structure consistency validated for both audio and video outputs")
+
+    # Check translation coverage
+    audio_zh_count = len([s for s in audio_transcript['segments'] if 'zh' in s and s['zh']])
+    video_zh_count = len([s for s in video_transcript['segments'] if 'zh' in s and s['zh']])
+
+    assert audio_zh_count > 0, "Audio transcript has no Chinese translations"
+    assert video_zh_count > 0, "Video transcript has no Chinese translations"
+
+    audio_coverage = audio_zh_count / len(audio_transcript['segments']) * 100
+    video_coverage = video_zh_count / len(video_transcript['segments']) * 100
+
+    print(f"✅ Translation coverage validated:")
+    print(f"  - Audio: {audio_zh_count}/{len(audio_transcript['segments'])} ({audio_coverage:.1f}%)")
+    print(f"  - Video: {video_zh_count}/{len(video_transcript['segments'])} ({video_coverage:.1f}%)")
+
+    print("✅ Main orchestration consistency test PASSED")

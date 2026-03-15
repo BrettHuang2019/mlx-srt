@@ -44,6 +44,30 @@ class TestPunctuationSpacing:
         assert result["segments"][0]["text"] == "Hello , world ."
         assert result["statistics"]["punctuation_fixed"] == 0
 
+    def test_collapse_repeated_spaced_ellipses(self):
+        """Collapse repeated ellipsis tokens like '... ... ...' to one '...'."""
+        whisper_output = {
+            "text": "... ... ... ... ... ...",
+            "segments": [
+                {"id": 3, "text": "... ... ... ... ... ...", "start": 0.0, "end": 2.0}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "..."
+        assert result["statistics"]["punctuation_fixed"] == 1
+
+    def test_collapse_repeated_exclamation_and_question_marks(self):
+        """Collapse excessive repeated punctuation to one mark."""
+        whisper_output = {
+            "text": "Wait!!!!!! Why???",
+            "segments": [
+                {"id": 4, "text": "Wait!!!!!! Why???", "start": 0.0, "end": 2.0}
+            ]
+        }
+        result = refine_segments(whisper_output)
+        assert result["segments"][0]["text"] == "Wait! Why?"
+        assert result["statistics"]["punctuation_fixed"] == 1
+
 
 class TestSplitLongBlocks:
     """Test splitting long segments."""

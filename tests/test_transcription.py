@@ -1,6 +1,7 @@
 import pytest
 from src.transcription.whisper_transcriber import transcribe_audio
 from src.transcription import whisper_transcriber
+from src.transcription import punctuation_kredor
 import os
 import json
 from types import SimpleNamespace
@@ -148,7 +149,7 @@ def test_calculate_punctuation_ratio():
     assert ratio == pytest.approx(1 / 13)
 
 
-def test_transcribe_audio_falls_back_on_low_punctuation(tmp_path, monkeypatch):
+def test_transcribe_audio_runs_punctuation_step_on_low_punctuation(tmp_path, monkeypatch):
     audio_file = tmp_path / "sample.wav"
     audio_file.write_text("stub", encoding="utf-8")
 
@@ -157,26 +158,143 @@ def test_transcribe_audio_falls_back_on_low_punctuation(tmp_path, monkeypatch):
         """
 whisper:
   model_path: "primary-model"
-  fallback_model_paths:
-    - "fallback-model"
   min_punctuation_ratio: 0.05
+  punctuation:
+    model_path: "punctuation-model"
   language: "french"
         """.strip(),
         encoding="utf-8",
     )
 
-    calls = []
+    whisper_calls = []
+    punctuation_calls = []
 
     def fake_transcribe(speech_file, path_or_hf_repo, **kwargs):
-        calls.append((speech_file, path_or_hf_repo, kwargs))
-        if path_or_hf_repo == "primary-model":
-            return {
-                "text": "bonjour tout le monde",
-                "segments": [
-                    {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
-                ],
-            }
+        whisper_calls.append((speech_file, path_or_hf_repo, kwargs))
+        return {
+            "text": "bonjour tout le monde",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+            ],
+        }
 
+    monkeypatch.setattr(whisper_transcriber, "MLX_WHISPER_AVAILABLE", True)
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "mlx_whisper",
+        SimpleNamespace(transcribe=fake_transcribe),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "_apply_punctuation_step",
+        lambda payload, config: (
+            punctuation_calls.append((payload["text"], config["model_path"])) or (
+                {
+                    "text": "Bonjour tout le monde.",
+                    "segments": [
+                        {"id": 0, "start": 0.0, "end": 1.0, "text": "Bonjour tout le monde."}
+                    ],
+                },
+                {
+                    "model_path": config["model_path"],
+                    "chunk_count": 1,
+                    "chunk_words": 180,
+                    "input_punctuation_ratio": 0.0,
+                    "output_punctuation_ratio": 0.2,
+                    "mapping_stats": {"matched_word_count": 4},
+                    "punctuation_summary": {"total_chunks": 1},
+                },
+            )
+        ),
+    )
+
+    result = transcribe_audio(str(audio_file), str(config_file))
+
+    assert [call[1] for call in whisper_calls] == ["primary-model"]
+    assert punctuation_calls == [("bonjour tout le monde", "punctuation-model")]
+    assert result["text"] == "Bonjour tout le monde."
+    assert result["segments"][0]["text"] == "Bonjour tout le monde."
+
+
+def test_transcribe_audio_returns_punctuated_result_when_whisper_ratio_is_low(tmp_path, monkeypatch):
+    audio_file = tmp_path / "sample.wav"
+    audio_file.write_text("stub", encoding="utf-8")
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+whisper:
+  model_path: "primary-model"
+  min_punctuation_ratio: 0.20
+  punctuation:
+    model_path: "punctuation-model"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    punctuation_calls = []
+
+    def fake_transcribe(speech_file, path_or_hf_repo, **kwargs):
+        return {
+            "text": "bonjour tout le monde",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+            ],
+        }
+
+    monkeypatch.setattr(whisper_transcriber, "MLX_WHISPER_AVAILABLE", True)
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "mlx_whisper",
+        SimpleNamespace(transcribe=fake_transcribe),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "_apply_punctuation_step",
+        lambda payload, config: (
+            punctuation_calls.append((payload["text"], config["model_path"])) or (
+                {
+                    "text": "Bonjour tout le monde.",
+                    "segments": [
+                        {"id": 0, "start": 0.0, "end": 1.0, "text": "Bonjour tout le monde."}
+                    ],
+                },
+                {
+                    "model_path": config["model_path"],
+                    "chunk_count": 1,
+                    "chunk_words": 180,
+                    "input_punctuation_ratio": 0.0,
+                    "output_punctuation_ratio": 0.2,
+                    "mapping_stats": {"matched_word_count": 4},
+                    "punctuation_summary": {"total_chunks": 1},
+                },
+            )
+        ),
+    )
+
+    result = transcribe_audio(str(audio_file), str(config_file))
+
+    assert result["text"] == "Bonjour tout le monde."
+    assert punctuation_calls == [("bonjour tout le monde", "punctuation-model")]
+
+
+def test_transcribe_audio_can_return_metadata_for_pipeline(tmp_path, monkeypatch):
+    audio_file = tmp_path / "sample.wav"
+    audio_file.write_text("stub", encoding="utf-8")
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+whisper:
+  model_path: "primary-model"
+  min_punctuation_ratio: 0.01
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    def fake_transcribe(speech_file, path_or_hf_repo, **kwargs):
         return {
             "text": "Bonjour tout le monde.",
             "segments": [
@@ -192,14 +310,18 @@ whisper:
         raising=False,
     )
 
-    result = transcribe_audio(str(audio_file), str(config_file))
+    result, metadata = transcribe_audio(str(audio_file), str(config_file), return_metadata=True)
 
-    assert [call[1] for call in calls] == ["primary-model", "fallback-model"]
     assert result["text"] == "Bonjour tout le monde."
-    assert result["segments"][0]["text"] == "Bonjour tout le monde."
+    assert metadata["selected_strategy"] == "whisper"
+    assert metadata["selected_model_path"] == "primary-model"
+    assert metadata["punctuation_pass_applied"] is False
+    assert metadata["attempts"][0]["punctuation_ratio"] > 0
+    assert metadata["attempts"][0]["response"]["text"] == "Bonjour tout le monde."
+    assert metadata["attempts"][0]["response"]["segments"][0]["text"] == "Bonjour tout le monde."
 
 
-def test_transcribe_audio_returns_best_result_when_all_models_are_low_punctuation(tmp_path, monkeypatch):
+def test_transcribe_audio_failure_includes_attempt_metadata(tmp_path, monkeypatch):
     audio_file = tmp_path / "sample.wav"
     audio_file.write_text("stub", encoding="utf-8")
 
@@ -207,30 +329,169 @@ def test_transcribe_audio_returns_best_result_when_all_models_are_low_punctuatio
     config_file.write_text(
         """
 whisper:
-  model_path:
-    - "primary-model"
-    - "fallback-model"
+  model_path: "primary-model"
   min_punctuation_ratio: 0.20
+  punctuation:
+    model_path: "punctuation-model"
         """.strip(),
         encoding="utf-8",
     )
 
     def fake_transcribe(speech_file, path_or_hf_repo, **kwargs):
-        results = {
-            "primary-model": {
-                "text": "bonjour tout le monde",
-                "segments": [
-                    {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
-                ],
-            },
-            "fallback-model": {
-                "text": "Bonjour tout le monde.",
-                "segments": [
-                    {"id": 0, "start": 0.0, "end": 1.0, "text": "Bonjour tout le monde."}
-                ],
-            },
+        return {
+            "text": "bonjour tout le monde",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+            ],
         }
-        return results[path_or_hf_repo]
+
+    error_details = {
+        "stage": "segment_mapping",
+        "segment_id": 0,
+        "matched_words": 3,
+        "punctuation_chunks": [
+            {
+                "input_text": "bonjour tout le monde",
+                "raw_output": "Bonjour tout le monde.",
+            }
+        ],
+    }
+
+    def fake_apply_punctuation_step(payload, config):
+        raise punctuation_kredor.PunctuationAlignmentError(
+            "Failed to map punctuated text back onto transcription segments.",
+            details=error_details,
+        )
+
+    monkeypatch.setattr(whisper_transcriber, "MLX_WHISPER_AVAILABLE", True)
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "mlx_whisper",
+        SimpleNamespace(transcribe=fake_transcribe),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        whisper_transcriber,
+        "_apply_punctuation_step",
+        fake_apply_punctuation_step,
+    )
+
+    with pytest.raises(whisper_transcriber.TranscriptionPipelineError) as exc_info:
+        transcribe_audio(str(audio_file), str(config_file))
+
+    metadata = exc_info.value.metadata
+    assert metadata["status"] == "failed"
+    assert metadata["error"] == "Failed to map punctuated text back onto transcription segments."
+    assert metadata["error_details"]["stage"] == "segment_mapping"
+    assert metadata["error_details"]["segment_id"] == 0
+    assert metadata["attempts"][0]["type"] == "whisper"
+    assert metadata["attempts"][1]["type"] == "punctuation"
+    assert metadata["attempts"][1]["status"] == "failed"
+    assert metadata["attempts"][1]["model_path"] == "punctuation-model"
+    assert metadata["attempts"][1]["error_details"]["matched_words"] == 3
+    assert metadata["attempts"][1]["error_details"]["punctuation_chunks"][0]["input_text"] == "bonjour tout le monde"
+    assert metadata["attempts"][1]["error_details"]["punctuation_chunks"][0]["raw_output"] == "Bonjour tout le monde."
+    assert exc_info.value.partial_result["text"] == "bonjour tout le monde"
+
+
+def test_apply_punctuation_to_payload_returns_whisper_shaped_json(monkeypatch):
+    payload = {
+        "text": "bonjour tout le monde",
+        "segments": [
+            {"id": 0, "start": 0.0, "end": 1.0, "text": "bonjour tout le monde"}
+        ],
+    }
+
+    monkeypatch.setattr(
+        punctuation_kredor,
+        "process_whisper_payload",
+        lambda payload, classifier=None, model_id=None, chunk_words=None: (
+            {
+                "model": model_id,
+                "timestamp": "2026-01-01T00:00:00",
+                "source_text": payload["text"],
+                "punctuated_text": "Bonjour tout le monde.",
+                "mapping_stats": {"matched_word_count": 4},
+                "segments": [
+                    {
+                        "id": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "original_text": "bonjour tout le monde",
+                        "punctuated_text": "Bonjour tout le monde.",
+                    }
+                ],
+            },
+            {
+                "punctuation": {
+                    "total_chunks": 1,
+                    "chunk_words": 180,
+                },
+                "mapping": {"matched_word_count": 4},
+            },
+            [],
+        ),
+    )
+
+    result, metadata = punctuation_kredor.apply_punctuation_to_payload(
+        payload,
+        {"model_path": "punctuation-model", "chunk_words": 180},
+        whisper_transcriber._calculate_punctuation_ratio,
+    )
+
+    assert result["text"] == "Bonjour tout le monde."
+    assert result["segments"][0]["text"] == "Bonjour tout le monde."
+    assert metadata["model_path"] == "punctuation-model"
+    assert metadata["chunk_count"] == 1
+
+
+def test_rebuild_segments_keeps_mid_sentence_segment_start_lowercase():
+    segments = [
+        {"id": 228, "start": 486.0, "end": 487.8, "text": " Et on\n  n'imagine pas"},
+        {"id": 229, "start": 487.8, "end": 490.14, "text": " si vous regardez des entreprises\n  familiales"},
+    ]
+
+    rebuilt_segments, stats = punctuation_kredor.rebuild_segments(
+        segments,
+        "Et on n'imagine pas si vous regardez des entreprises familiales.",
+    )
+
+    assert rebuilt_segments[0]["punctuated_text"] == "Et on\n  n'imagine pas"
+    assert rebuilt_segments[1]["punctuated_text"] == "si vous regardez des entreprises\n  familiales."
+    assert stats["matched_word_count"] == 10
+
+
+def test_rebuild_segments_lowercases_continuation_segment_start_after_comma():
+    segments = [
+        {"id": 5, "start": 19.32, "end": 20.82, "text": "D'accord, ben moi, c'etait aujourd'hui,"},
+        {"id": 6, "start": 20.82, "end": 23.94, "text": "Mais si vous etes un client fidele, vous avez peut-etre recu un cadeau."},
+    ]
+
+    rebuilt_segments, stats = punctuation_kredor.rebuild_segments(
+        segments,
+        "D'accord, ben moi, c'etait aujourd'hui, mais si vous etes un client fidele, vous avez peut-etre recu un cadeau. Aussi, il faut verifier.",
+    )
+
+    assert rebuilt_segments[0]["punctuated_text"] == "D'accord, ben moi, c'etait aujourd'hui,"
+    assert rebuilt_segments[1]["punctuated_text"].startswith("mais si vous etes un client fidele")
+    assert stats["matched_word_count"] == 18
+
+
+def test_transcribe_audio_wraps_final_whisper_failure_with_metadata(tmp_path, monkeypatch):
+    audio_file = tmp_path / "sample.wav"
+    audio_file.write_bytes(b"audio")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+whisper:
+  model_path: "broken-a"
+  min_punctuation_ratio: 0.01
+""".strip(),
+        encoding="utf-8",
+    )
+
+    def fake_transcribe(*args, **kwargs):
+        raise RuntimeError(f"failed:{kwargs['path_or_hf_repo']}")
 
     monkeypatch.setattr(whisper_transcriber, "MLX_WHISPER_AVAILABLE", True)
     monkeypatch.setattr(
@@ -240,6 +501,12 @@ whisper:
         raising=False,
     )
 
-    result = transcribe_audio(str(audio_file), str(config_file))
+    with pytest.raises(whisper_transcriber.TranscriptionPipelineError) as exc_info:
+        whisper_transcriber.transcribe_audio(str(audio_file), str(config_file))
 
-    assert result["text"] == "Bonjour tout le monde."
+    metadata = exc_info.value.metadata
+    assert metadata["status"] == "failed"
+    assert metadata["selected_strategy"] == "failed"
+    assert metadata["error"] == "failed:broken-a"
+    assert [attempt["model_path"] for attempt in metadata["attempts"]] == ["broken-a"]
+    assert all(attempt["status"] == "failed" for attempt in metadata["attempts"])

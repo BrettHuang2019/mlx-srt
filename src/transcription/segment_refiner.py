@@ -60,6 +60,7 @@ def refine_segments(whisper_output: Dict[str, Any], output_dir: str = None) -> D
         original_text = segment.get("text", "")
         # Remove spaces before ! and ?
         fixed_text = re.sub(r'\s+([!?])', r'\1', original_text)
+        fixed_text = _normalize_repeated_punctuation(fixed_text)
         if fixed_text != original_text:
             segment["text"] = fixed_text
             stats["punctuation_fixed"] += 1
@@ -435,6 +436,19 @@ def _remove_duplicate_segments(segments: List[Dict[str, Any]]) -> Tuple[List[Dic
         cleaned_segments.append(segment)
 
     return cleaned_segments, removed_count
+
+
+def _normalize_repeated_punctuation(text: str) -> str:
+    """Collapse excessive repeated punctuation to a single occurrence."""
+    # Convert repeated ellipsis runs like "... ... ..." or "........." to one ellipsis.
+    text = re.sub(r'(?:\.\.\.)(?:\s*(?:\.\.\.))+', '...', text)
+    text = re.sub(r'\.{4,}', '...', text)
+    # Collapse repeated multi-character punctuation tokens separated by spaces.
+    text = re.sub(r'([^\w\s]+)(?:\s+\1){2,}', r'\1', text)
+    # Collapse long runs of the same punctuation character.
+    text = re.sub(r'([^\w\s.])\1{2,}', r'\1', text)
+    # Clean up extra spaces left around collapsed punctuation.
+    return re.sub(r'\s{2,}', ' ', text).strip()
 
 
 def _remove_repeated_words(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:

@@ -49,10 +49,115 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from ingestion.extract_audio import extract_audio
 from ingestion.download_from_url import is_url, download_video_from_url
-from transcription.whisper_transcriber import transcribe_audio
+from transcription.whisper_transcriber import transcribe_audio, TranscriptionPipelineError
 from translation.translate import translation_pipeline
 from subtitle.generate_srt import generate_srt_from_segments
 from task_manager import check_system_resources
+
+
+def save_transcription_report(
+    output_dir: str,
+    transcription_metadata: Optional[Dict[str, Any]],
+    error_message: Optional[str] = None,
+) -> None:
+    """Persist transcription details and failures alongside Whisper artifacts."""
+    output_path = Path(output_dir)
+    metadata_file = output_path / "00_transcription_metadata.json"
+    report_file = output_path / "00_transcription_report.txt"
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    transcription_metadata = transcription_metadata or {}
+
+    metadata_to_save = dict(transcription_metadata)
+    transformed_attempts = []
+    for index, attempt in enumerate(metadata_to_save.get("attempts", []), start=1):
+        attempt_to_save = dict(attempt)
+        if attempt_to_save.get("response") is not None:
+            response_file_name = (
+                f"00_transcription_attempt_{index:02d}_{attempt_to_save.get('type', 'unknown')}.json"
+            )
+            response_file = output_path / response_file_name
+            with open(response_file, 'w', encoding='utf-8') as f:
+                json.dump(attempt_to_save["response"], f, ensure_ascii=False, indent=2)
+            attempt_to_save["response_file"] = response_file_name
+            attempt_to_save.pop("response", None)
+        transformed_attempts.append(attempt_to_save)
+    if transformed_attempts:
+        metadata_to_save["attempts"] = transformed_attempts
+    if error_message:
+        metadata_to_save["status"] = "failed"
+        metadata_to_save["error"] = error_message
+
+    if metadata_to_save:
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata_to_save, f, ensure_ascii=False, indent=2)
+
+    with open(report_file, 'w', encoding='utf-8') as f:
+        f.write("=== TRANSCRIPTION REPORT ===\n\n")
+        f.write(f"Status: {metadata_to_save.get('status', 'completed')}\n")
+        if error_message:
+            f.write(f"Error: {error_message}\n")
+        f.write(f"Selected strategy: {metadata_to_save.get('selected_strategy', 'unknown')}\n")
+        f.write(f"Selected model: {metadata_to_save.get('selected_model_path', 'unknown')}\n")
+        f.write(
+            f"Final punctuation ratio: {metadata_to_save.get('final_punctuation_ratio', 0.0):.4f}\n"
+        )
+        f.write(
+            f"Minimum punctuation ratio: {metadata_to_save.get('min_punctuation_ratio', 0.0):.4f}\n"
+        )
+        f.write(
+            f"Punctuation pass applied: {metadata_to_save.get('punctuation_pass_applied', False)}\n"
+        )
+        if metadata_to_save.get("punctuation_model"):
+            f.write(f"Punctuation model: {metadata_to_save['punctuation_model']}\n")
+        if metadata_to_save.get("punctuation_chunk_count") is not None:
+            f.write(f"Punctuation chunks: {metadata_to_save['punctuation_chunk_count']}\n")
+        if metadata_to_save.get("punctuation_chunk_words") is not None:
+            f.write(f"Punctuation chunk words: {metadata_to_save['punctuation_chunk_words']}\n")
+        if metadata_to_save.get("punctuation_mapping_stats"):
+            mapping_stats = metadata_to_save["punctuation_mapping_stats"]
+            f.write("Punctuation mapping stats:\n")
+            for key, value in mapping_stats.items():
+                f.write(f"  {key}: {value}\n")
+        if metadata_to_save.get("error_details"):
+            f.write("\nError details:\n")
+            for key, value in metadata_to_save["error_details"].items():
+                f.write(f"{key}: {value}\n")
+
+        f.write("\nAttempts:\n")
+        attempts = metadata_to_save.get("attempts", [])
+        if not attempts:
+            f.write("none\n")
+        else:
+            for index, attempt in enumerate(attempts, start=1):
+                f.write(f"{index}. type={attempt.get('type', 'unknown')}\n")
+                f.write(f"   model={attempt.get('model_path', 'unknown')}\n")
+                f.write(f"   status={attempt.get('status', 'unknown')}\n")
+                if "punctuation_ratio" in attempt:
+                    f.write(f"   punctuation_ratio={attempt['punctuation_ratio']:.4f}\n")
+                if "input_punctuation_ratio" in attempt:
+                    f.write(f"   input_punctuation_ratio={attempt['input_punctuation_ratio']:.4f}\n")
+                if "output_punctuation_ratio" in attempt:
+                    f.write(f"   output_punctuation_ratio={attempt['output_punctuation_ratio']:.4f}\n")
+                if "chunk_count" in attempt:
+                    f.write(f"   chunk_count={attempt['chunk_count']}\n")
+                if "chunk_words" in attempt:
+                    f.write(f"   chunk_words={attempt['chunk_words']}\n")
+                if attempt.get("mapping_stats"):
+                    for detail_key, detail_value in attempt["mapping_stats"].items():
+                        f.write(f"   mapping_{detail_key}={detail_value}\n")
+                if attempt.get("error"):
+                    f.write(f"   error={attempt['error']}\n")
+                if attempt.get("error_details"):
+                    for detail_key, detail_value in attempt["error_details"].items():
+                        f.write(f"   {detail_key}={detail_value}\n")
+                if attempt.get("response_file"):
+                    f.write(f"   response_file={attempt['response_file']}\n")
+                f.write("\n")
+
+    if metadata_to_save:
+        print(f"Transcription metadata saved: {metadata_file}")
+    print(f"Transcription report saved: {report_file}")
 
 
 def process_audio_file(audio_path: str, output_dir: str, resume: bool = False, url: str = None, downloaded_file: str = None, video_title: str = None) -> Dict[str, Any]:
@@ -77,23 +182,39 @@ def process_audio_file(audio_path: str, output_dir: str, resume: bool = False, u
 
     # For resume mode, check if transcription already exists
     transcription_file = Path(output_dir) / "00_whisper_transcription.json"
+    transcription_metadata_file = Path(output_dir) / "00_transcription_metadata.json"
     whisper_result = None
+    transcription_metadata = None
 
     if resume and transcription_file.exists():
         print(f"\nStep 1: Loading existing transcription...")
         with open(transcription_file, 'r', encoding='utf-8') as f:
             whisper_result = json.load(f)
+        if transcription_metadata_file.exists():
+            with open(transcription_metadata_file, 'r', encoding='utf-8') as f:
+                transcription_metadata = json.load(f)
         print(f"Transcription loaded: {transcription_file}")
     else:
         print(f"\nStep 1: Transcribing audio...")
         try:
-            whisper_result = transcribe_audio(audio_path)
+            whisper_result, transcription_metadata = transcribe_audio(audio_path, return_metadata=True)
 
             # Save transcription
             with open(transcription_file, 'w', encoding='utf-8') as f:
                 json.dump(whisper_result, f, ensure_ascii=False, indent=2)
             print(f"Transcription saved: {transcription_file}")
+            save_transcription_report(output_dir, transcription_metadata)
         except Exception as e:
+            failure_metadata = None
+            partial_result = None
+            if isinstance(e, TranscriptionPipelineError):
+                failure_metadata = e.metadata
+                partial_result = e.partial_result
+            if partial_result:
+                with open(transcription_file, 'w', encoding='utf-8') as f:
+                    json.dump(partial_result, f, ensure_ascii=False, indent=2)
+                print(f"💾 Raw Whisper transcription saved despite failure: {transcription_file}")
+            save_transcription_report(output_dir, failure_metadata, error_message=str(e))
             # Mark pipeline as failed
             state_file = Path(output_dir) / "state.json"
             if state_file.exists():
@@ -113,7 +234,15 @@ def process_audio_file(audio_path: str, output_dir: str, resume: bool = False, u
     # Step 2: Translation pipeline
     print(f"\nStep 2: Running translation pipeline...")
     try:
-        translated_transcript = translation_pipeline(whisper_result, output_dir, resume, url, downloaded_file, video_title)
+        translated_transcript = translation_pipeline(
+            whisper_result,
+            output_dir,
+            resume,
+            url,
+            downloaded_file,
+            video_title,
+            transcription_metadata=transcription_metadata,
+        )
     except Exception as e:
         # Mark pipeline as failed
         state_file = Path(output_dir) / "state.json"
