@@ -6,6 +6,8 @@ import re
 from typing import Dict, Any, List, Tuple
 from pathlib import Path
 
+SENTENCE_END_PUNCTUATION = set(".!?。！？…")
+
 
 def refine_segments(whisper_output: Dict[str, Any], output_dir: str = None) -> Dict[str, Any]:
     """Refine Whisper transcription segments with improved spacing, merging, and splitting.
@@ -106,87 +108,92 @@ def refine_segments(whisper_output: Dict[str, Any], output_dir: str = None) -> D
 
 
 def _merge_fragments(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:
-    """Merge consecutive segments where the first doesn't end with sentence-ending punctuation."""
+    """Merge consecutive segments when the merge scoring rule passes."""
     if not segments:
         return [], 0, []
 
-    merged = []
     merge_count = 0
     merge_details = []
-    i = 0
+    current_segments = [segment.copy() for segment in segments]
 
-    while i < len(segments):
-        current = segments[i].copy()
-        original_text = current.get("text", "")
+    while True:
+        merged = []
+        changed = False
+        i = 0
 
-        # Preserve leading spaces but work with stripped text for logic
-        has_leading_space = original_text.startswith(" ")
-        text = original_text.strip()
+        while i < len(current_segments):
+            current = current_segments[i].copy()
 
-        # Check if this segment ends with sentence-ending punctuation
-        if text and text[-1] not in ".!?":
-            # This is a fragment, merge with next segments until we find a complete sentence
-            j = i + 1
-            merged_text = text
-            end_time = current["end"]
-            has_merged = False
-
-            # Capture before segments for reporting
-            before_segments = [current.copy()]
-
-            while j < len(segments):
-                next_segment = segments[j]
-                next_text = next_segment.get("text", "").strip()
-                if not next_text:
-                    j += 1
-                    continue
-
-                before_segments.append(next_segment.copy())
-                merged_text += " " + next_text
-                end_time = next_segment["end"]
-                has_merged = True
-
-                # If we found a complete sentence, stop merging
-                if next_text[-1] in ".!?":
-                    break
-                j += 1
-
-            # Only count as a merge if we actually merged with another segment
-            if has_merged:
-                merge_count += 1
-
-                # Create the merged segment
-                merged_segment = current.copy()
-                merged_segment["text"] = " " + merged_text if has_leading_space else merged_text
-                merged_segment["end"] = end_time
-
-                # Capture merge details for reporting
-                merge_detail = {
-                    "merge_id": merge_count,
-                    "before_segments": before_segments,
-                    "after_segment": merged_segment.copy(),
-                    "original_count": len(before_segments),
-                    "merged_start": merged_segment["start"],
-                    "merged_end": merged_segment["end"],
-                    "original_texts": [seg.get("text", "") for seg in before_segments],
-                    "merged_text": merged_segment["text"]
-                }
-                merge_details.append(merge_detail)
-
-                merged.append(merged_segment)
-                i = j + 1  # Skip the segments we merged
-            else:
-                # No merge occurred, just add the original
-                current["text"] = original_text
+            if i + 1 >= len(current_segments):
                 merged.append(current)
                 i += 1
-        else:
-            # This segment is already complete, just add it
-            current["text"] = original_text
+                continue
+
+            next_segment = current_segments[i + 1]
+            if _should_merge_segments(current, next_segment):
+                merged_segment = current.copy()
+                merged_segment["text"] = _merge_segment_text(
+                    current.get("text", ""),
+                    next_segment.get("text", ""),
+                )
+                merged_segment["end"] = next_segment["end"]
+
+                merge_count += 1
+                merge_details.append({
+                    "merge_id": merge_count,
+                    "before_segments": [current.copy(), next_segment.copy()],
+                    "after_segment": merged_segment.copy(),
+                    "original_count": 2,
+                    "merged_start": merged_segment["start"],
+                    "merged_end": merged_segment["end"],
+                    "original_texts": [
+                        current.get("text", ""),
+                        next_segment.get("text", ""),
+                    ],
+                    "merged_text": merged_segment["text"],
+                })
+
+                merged.append(merged_segment)
+                changed = True
+                i += 2
+                continue
+
             merged.append(current)
             i += 1
 
-    return merged, merge_count, merge_details
+        current_segments = merged
+        if not changed:
+            return current_segments, merge_count, merge_details
+
+
+def _should_merge_segments(current: Dict[str, Any], next_segment: Dict[str, Any]) -> bool:
+    """Return True when the configured score-based merge rule passes."""
+    merged_duration = next_segment["end"] - current["start"]
+    if merged_duration >= 8.0:
+        return False
+
+    current_text = current.get("text", "").strip()
+    current_duration = current["end"] - current["start"]
+    gap_to_next = next_segment["start"] - current["end"]
+
+    score = 0
+    if current_duration < 2.0:
+        score += 2
+    if current_text and current_text[-1] not in SENTENCE_END_PUNCTUATION:
+        score += 1
+    if len(current_text.split()) < 5:
+        score += 1
+    if gap_to_next < 0.1:
+        score += 1
+
+    return score >= 3
+
+
+def _merge_segment_text(current_text: str, next_text: str) -> str:
+    """Join adjacent segment text while preserving a leading continuation space."""
+    has_leading_space = current_text.startswith(" ")
+    merged_text = f"{current_text.strip()} {next_text.strip()}".strip()
+    return f" {merged_text}" if has_leading_space else merged_text
 
 
 def _split_long_blocks(segments: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:

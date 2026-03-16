@@ -150,7 +150,7 @@ class TestMergeFragmentedSentences:
         assert result["statistics"]["segments_merged"] == 1
 
     def test_merge_multiple_fragments_into_complete_sentence(self):
-        """Chain of 3+ fragments merge until finding .!?"""
+        """Iterative scoring can merge a chain all the way through."""
         whisper_output = {
             "text": "Part one part two part three. New sentence starts here",
             "segments": [
@@ -161,10 +161,9 @@ class TestMergeFragmentedSentences:
             ]
         }
         result = refine_segments(whisper_output)
-        assert len(result["segments"]) == 2
-        assert result["segments"][0]["text"] == "Part one part two part three."
-        assert result["segments"][1]["text"] == "New sentence starts here"
-        assert result["statistics"]["segments_merged"] >= 1
+        assert len(result["segments"]) == 1
+        assert result["segments"][0]["text"] == "Part one part two part three. New sentence starts here"
+        assert result["statistics"]["segments_merged"] == 3
 
     def test_no_merge_when_sentence_is_complete(self):
         """Segment ending with .!? stays separate"""
@@ -182,7 +181,7 @@ class TestMergeFragmentedSentences:
         assert result["statistics"]["segments_merged"] == 0
 
     def test_merged_timing_uses_combined_range(self):
-        """Start from first segment, end from last segment"""
+        """Chained pairwise merges should preserve the outer timing bounds."""
         whisper_output = {
             "text": "First part second part third part.",
             "segments": [
@@ -195,14 +194,65 @@ class TestMergeFragmentedSentences:
         assert len(result["segments"]) == 1
         assert result["segments"][0]["start"] == 1.0
         assert result["segments"][0]["end"] == 5.0
-        assert result["statistics"]["segments_merged"] == 1
+        assert result["statistics"]["segments_merged"] == 2
+
+    def test_no_merge_when_score_is_below_threshold(self):
+        """Do not merge when the score is below 3."""
+        whisper_output = {
+            "text": "This segment has enough words Another segment.",
+            "segments": [
+                {
+                    "id": 0,
+                    "text": "This segment has enough words",
+                    "start": 0.0,
+                    "end": 3.0,
+                },
+                {
+                    "id": 1,
+                    "text": "Another segment.",
+                    "start": 0.3,
+                    "end": 1.8,
+                },
+            ],
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 2
+        assert result["statistics"]["segments_merged"] == 0
+
+    def test_no_merge_when_hard_gate_duration_fails(self):
+        """Do not merge when the merged duration would be 8s or longer."""
+        whisper_output = {
+            "text": "Short fragment completion.",
+            "segments": [
+                {"id": 0, "text": "Short fragment", "start": 0.0, "end": 1.0},
+                {"id": 1, "text": "completion.", "start": 7.0, "end": 8.1},
+            ],
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 2
+        assert result["statistics"]["segments_merged"] == 0
+
+    def test_merge_applies_iteratively_until_stable(self):
+        """Repeated passes should allow chained merges."""
+        whisper_output = {
+            "text": "One two three four five six.",
+            "segments": [
+                {"id": 0, "text": "One two", "start": 0.0, "end": 1.0},
+                {"id": 1, "text": "three four", "start": 1.0, "end": 2.0},
+                {"id": 2, "text": "five six.", "start": 2.0, "end": 3.0},
+            ],
+        }
+        result = refine_segments(whisper_output)
+        assert len(result["segments"]) == 1
+        assert result["segments"][0]["text"] == "One two three four five six."
+        assert result["statistics"]["segments_merged"] == 2
 
 
 class TestRealWorldData:
     """Test with patterns from actual Whisper output."""
 
     def test_merge_fragments_seen_in_whisper_output(self):
-        """Test merging like segments 35-36 in real data: 'quand il va commencer à faire froid' + 'ou quand il va pleuvoir.'"""
+        """Long segments should not merge when they fail the score threshold."""
         whisper_output = {
             "text": " Mais tu vas voir quand il va commencer à faire froid ou quand il va pleuvoir. Ce ne sera pas une partie de plaisir.",
             "segments": [
@@ -212,18 +262,8 @@ class TestRealWorldData:
             ]
         }
         result = refine_segments(whisper_output)
-        # Check that merging occurred - should have fewer segments than input
-        assert len(result["segments"]) < len(whisper_output["segments"])
-        # Find the merged segment
-        merged_segment = None
-        for segment in result["segments"]:
-            if "froid ou quand il va pleuvoir" in segment["text"]:
-                merged_segment = segment
-                break
-        assert merged_segment is not None
-        assert merged_segment["start"] == 92.24
-        assert merged_segment["end"] == 95.7
-        assert result["statistics"]["segments_merged"] >= 1
+        assert len(result["segments"]) == len(whisper_output["segments"])
+        assert result["statistics"]["segments_merged"] == 0
 
     def test_handle_segments_with_leading_spaces(self):
         """Test segments that start with spaces like many in real output"""
