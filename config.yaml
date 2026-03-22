@@ -9,7 +9,7 @@ whisper:
     chunk_words: 180
 
 system:
-  min_ram_gb: 3
+  min_ram_gb: 2.5
   task_check_interval: 60
   max_wait_time_minutes: 30
 
