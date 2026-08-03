@@ -22,7 +22,7 @@ def test_contender_times_out_and_killed_holder_releases(tmp_path):
     holder.start()
     assert ready.wait(5)
     try:
-        with pytest.raises(LockTimeoutError, match="holder.mp4"):
+        with pytest.raises(LockTimeoutError, match=r"holder\.mp4"):
             RunLock("waiter.mp4", lock_path=lock_path, interval=0.01, timeout=0.03).acquire()
     finally:
         os.kill(holder.pid, signal.SIGKILL)

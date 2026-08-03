@@ -4,14 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-DEFAULT_MODEL_ID = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
 
-
-def align(
-    wav_path: str | Path,
-    text: str,
-    model_id: str = DEFAULT_MODEL_ID,
-) -> list[dict[str, object]]:
+def align(wav_path: str | Path, text: str, model_id: str) -> list[dict[str, object]]:
     wav_path = Path(wav_path)
     if not wav_path.is_file():
         raise FileNotFoundError(wav_path)

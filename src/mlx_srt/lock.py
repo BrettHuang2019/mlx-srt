@@ -40,7 +40,7 @@ class RunLock:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return {}
 
-    def acquire(self) -> "RunLock":
+    def acquire(self) -> RunLock:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         deadline = time.monotonic() + self.timeout
@@ -57,7 +57,7 @@ class RunLock:
                     )
                     os.close(self.fd)
                     self.fd = None
-                    raise LockTimeoutError(message)
+                    raise LockTimeoutError(message) from None
                 if self.on_wait:
                     self.on_wait(holder)
                 time.sleep(min(self.interval, max(0, deadline - time.monotonic())))
@@ -78,7 +78,7 @@ class RunLock:
             os.close(self.fd)
             self.fd = None
 
-    def __enter__(self) -> "RunLock":
+    def __enter__(self) -> RunLock:
         return self.acquire()
 
     def __exit__(self, exc_type, exc, traceback) -> None:

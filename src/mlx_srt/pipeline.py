@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
@@ -107,10 +108,8 @@ def _clean_artifacts(artifact_dir: Path, *, preserve: tuple[Path, ...] = ()) -> 
         if path.resolve() not in preserved:
             path.unlink(missing_ok=True)
         path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         artifact_dir.rmdir()
-    except OSError:
-        pass
 
 
 def _new_state(input_file: Path, final_srt: Path) -> dict[str, Any]:
@@ -213,17 +212,9 @@ def run_pipeline(
                         if paths["merge"].resolve() != final_srt:
                             shutil.copyfile(paths["merge"], final_srt)
                 elif step == "translate":
-                    settings = translate.TranslationSettings(
-                        model_path=config.translate.model_path,
-                        batch_size=config.translate.batch_size,
-                        max_tokens=config.translate.max_tokens,
-                        temperature=config.translate.temperature,
-                        max_retries=config.translate.max_retries,
-                        retry_delay=config.translate.retry_delay,
-                    )
                     bilingual = translate.translate_srt(
                         paths["merge"].read_text(encoding="utf-8"),
-                        settings=settings,
+                        settings=translate.TranslationSettings.from_config(config.translate),
                         prompt_file=Path(prompt_file).expanduser().resolve() if prompt_file else config.translate.prompt_file,
                     )
                     final_srt.parent.mkdir(parents=True, exist_ok=True)

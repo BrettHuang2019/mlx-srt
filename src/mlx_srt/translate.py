@@ -6,6 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from .srt import format_bilingual_subtitles, parse_srt
@@ -28,28 +29,35 @@ class TranslationSettings:
     max_retries: int = 1
     retry_delay: float = 1.0
 
+    @classmethod
+    def from_config(cls, section) -> TranslationSettings:
+        """Build settings from a loaded ``config.translate`` section."""
+        return cls(
+            section.model_path, section.batch_size, section.max_tokens,
+            section.temperature, section.max_retries, section.retry_delay,
+        )
 
-_model = None
-_tokenizer = None
-_loaded_path: str | None = None
+
+@lru_cache(maxsize=1)
+def _load_model(model_path: str):
+    from mlx_lm import load  # lazy: model is large
+
+    return load(model_path)
 
 
 def generate_text(prompt: str, settings: TranslationSettings) -> str:
-    global _model, _tokenizer, _loaded_path
-    from mlx_lm import generate, load
+    from mlx_lm import generate
     from mlx_lm.sample_utils import make_sampler
 
-    if _loaded_path != settings.model_path:
-        _model, _tokenizer = load(settings.model_path)
-        _loaded_path = settings.model_path
-    formatted = _tokenizer.apply_chat_template(
+    model, tokenizer = _load_model(settings.model_path)
+    formatted = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
         add_generation_prompt=True,
         tokenize=False,
     )
     return generate(
-        _model,
-        _tokenizer,
+        model,
+        tokenizer,
         prompt=formatted,
         max_tokens=settings.max_tokens,
         sampler=make_sampler(settings.temperature),
@@ -92,8 +100,8 @@ def parse_and_validate(raw: str, batch: list[dict]) -> list[dict]:
     parsed = _extract_json_array(raw)
     if len(parsed) != len(batch):
         raise ValidationError(f"Length mismatch: expected {len(batch)}, got {len(parsed)}")
-    for item, expected in zip(parsed, batch):
-        if not isinstance(item, dict) or set(("id", "zh")) - item.keys():
+    for item, expected in zip(parsed, batch, strict=True):
+        if not isinstance(item, dict) or {"id", "zh"} - item.keys():
             raise ValidationError(f"Missing id/zh keys: {item!r}")
         if not isinstance(item["id"], int) or item["id"] != expected["id"]:
             raise ValidationError(f"ID mismatch: expected {expected['id']}, got {item.get('id')!r}")

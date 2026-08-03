@@ -106,8 +106,10 @@ def load_config(
     input_path: str | Path | None = None,
     explicit: str | Path | None = None,
 ) -> Config:
-    default_resource = resources.files("mlx_srt").joinpath("defaults.yaml")
-    defaults = yaml.safe_load(default_resource.read_text(encoding="utf-8"))
+    package_dir = resources.files("mlx_srt")
+    defaults = yaml.safe_load(
+        package_dir.joinpath("defaults.yaml").read_text(encoding="utf-8")
+    )
     override_path, required = find_override_config(input_path, explicit)
     override: dict[str, Any] = {}
     if override_path is not None:
@@ -134,7 +136,7 @@ def load_config(
     elif prompt_declared_by_override:
         prompt_path = override_path.parent / prompt_value
     else:
-        prompt_path = Path(str(default_resource)).parent / prompt_value
+        prompt_path = Path(str(package_dir)) / prompt_value
 
     return Config(
         stt=STTConfig(**merged["stt"]),

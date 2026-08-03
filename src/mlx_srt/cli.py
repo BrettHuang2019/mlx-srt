@@ -9,7 +9,8 @@ from pathlib import Path
 
 import click
 
-from . import __version__, align as align_stage, audio, merge, punctuate, stt, translate
+from . import __version__, audio, merge, punctuate, stt, translate
+from . import align as align_stage
 from .config import load_config
 from .pipeline import run_pipeline
 
@@ -195,12 +196,9 @@ def translate_command(input_file: Path, output_file: Path, prompt_file: Path | N
     """Translate a French SRT to bilingual French/Chinese SRT."""
     _configure_logging(debug)
     config = load_config(input_file, config_file)
-    settings = translate.TranslationSettings(
-        config.translate.model_path, config.translate.batch_size, config.translate.max_tokens,
-        config.translate.temperature, config.translate.max_retries, config.translate.retry_delay,
-    )
     result = translate.translate_srt(
-        input_file.read_text(encoding="utf-8"), settings=settings,
+        input_file.read_text(encoding="utf-8"),
+        settings=translate.TranslationSettings.from_config(config.translate),
         prompt_file=prompt_file.expanduser().resolve() if prompt_file else config.translate.prompt_file,
     )
     _write_result(result, output_file, to_stdout)

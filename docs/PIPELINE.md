@@ -5,8 +5,7 @@ MLX-SRT turns a local audio or video file into French/Chinese subtitles. It is a
 ## Install and run
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[test]'
+make install                  # python3 -m venv .venv && pip install -e '.[test,dev]'
 bin/mlx-srt /path/to/clip.mp4
 ```
 
@@ -97,6 +96,10 @@ After acquiring the lock, the process checks available RAM using `psutil`. Missi
 `pytest` runs fast mocked unit tests and deselects `integration` tests. Real model validation is opt-in:
 
 ```bash
-.venv/bin/pytest
-.venv/bin/pytest -m integration
+make test              # .venv/bin/pytest
+make test-integration  # .venv/bin/pytest -m integration
+make lint              # .venv/bin/ruff check src tests
 ```
+
+There is no auto-formatter. `ruff check` is the only style gate; the compact
+hand-wrapped layout is deliberate.

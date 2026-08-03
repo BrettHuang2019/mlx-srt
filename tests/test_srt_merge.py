@@ -46,6 +46,6 @@ def test_merge_srt_constructs_cues():
         {"text": "Bonjour", "start": 0, "end": 0.5},
         {"text": "monde", "start": 0.6, "end": 1.1},
     ]
-    output = merge_srt(stamps, "Bonjour monde.")
+    output = merge_srt(stamps, "Bonjour monde.", max_chars=100, min_chars=30, min_duration=1.0)
     assert "00:00:00,000 --> 00:00:01,100" in output
     assert "Bonjour monde." in output

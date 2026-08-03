@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-mock>=3.10"]
+dev = ["ruff>=0.6"]
 
 [project.scripts]
 mlx-srt = "mlx_srt.cli:main"
@@ -32,6 +33,15 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mlx_srt = ["defaults.yaml", "prompts/*.txt"]
+
+[tool.ruff]
+line-length = 150
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# French text and typographic apostrophes are intentional throughout.
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not integration'"

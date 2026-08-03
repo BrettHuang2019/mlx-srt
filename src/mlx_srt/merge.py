@@ -7,9 +7,6 @@ from typing import TypeAlias
 
 from .srt import Segment, format_srt_time, render_srt
 
-MAX_CHARS = 100
-MIN_CHARS = 30
-MIN_DURATION = 1.0
 SPLIT_WORDS = {"et", "mais", "donc", "parce", "bref", "enfin", "puis", "car", "or"}
 DANGLING_WORDS = {
     "de", "du", "le", "la", "les", "un", "une", "et", "à", "en", "des", "se",
@@ -59,14 +56,14 @@ def find_best_split(words: list[Word]) -> int | None:
     return best
 
 
-def split_long(subs: list[list[Word]], max_chars: int = MAX_CHARS) -> list[list[Word]]:
+def split_long(subs: list[list[Word]], max_chars: int) -> list[list[Word]]:
     result = []
     for words in subs:
         if sub_len(words) <= max_chars:
             result.append(words)
             continue
         split = find_best_split(words)
-        if not split:
+        if split is None:
             result.append(words)
         else:
             result.extend(split_long([words[:split]], max_chars))
@@ -76,9 +73,9 @@ def split_long(subs: list[list[Word]], max_chars: int = MAX_CHARS) -> list[list[
 
 def merge_short(
     subs: list[list[Word]],
-    max_chars: int = MAX_CHARS,
-    min_chars: int = MIN_CHARS,
-    min_duration: float = MIN_DURATION,
+    max_chars: int,
+    min_chars: int,
+    min_duration: float,
 ) -> list[list[Word]]:
     result = []
     i = 0
@@ -121,9 +118,9 @@ def align_words(timestamps: list[dict], punct_text: str) -> list[Word]:
 def build_subtitles(
     aligned: list[Word],
     *,
-    max_chars: int = MAX_CHARS,
-    min_chars: int = MIN_CHARS,
-    min_duration: float = MIN_DURATION,
+    max_chars: int,
+    min_chars: int,
+    min_duration: float,
 ) -> list[list[Word]]:
     sentences: list[list[Word]] = []
     current: list[Word] = []
@@ -141,9 +138,9 @@ def merge_srt(
     timestamps: list[dict],
     punct_text: str,
     *,
-    max_chars: int = MAX_CHARS,
-    min_chars: int = MIN_CHARS,
-    min_duration: float = MIN_DURATION,
+    max_chars: int,
+    min_chars: int,
+    min_duration: float,
 ) -> str:
     groups = build_subtitles(
         align_words(timestamps, punct_text),

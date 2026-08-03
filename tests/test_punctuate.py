@@ -13,11 +13,16 @@ def test_punctuate_maps_predictions_to_word_spans():
             {"entity_group": ".", "start": 8, "end": 13},
         ]
 
-    assert punctuate_text("bonjour monde", classifier, chunk_words=180) == "Bonjour, monde."
+    assert punctuate_text("bonjour monde", classifier, model_id="", chunk_words=180) == "Bonjour, monde."
 
 
 def test_punctuate_empty_does_not_load_model():
-    assert punctuate_text("... !!!", classifier=lambda _: (_ for _ in ()).throw(AssertionError())) == ""
+    assert punctuate_text(
+        "... !!!",
+        classifier=lambda _: (_ for _ in ()).throw(AssertionError()),
+        model_id="",
+        chunk_words=180,
+    ) == ""
 
 
 def test_helpers():

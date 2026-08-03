@@ -37,7 +37,7 @@ MLX-SRT is a local-first macOS command-line tool and Finder Service that convert
 
 ## Acceptance criteria
 
-- `pip install -e '.[test]'` installs the `mlx-srt` entry point and package data.
+- `pip install -e '.[test,dev]'` installs the `mlx-srt` entry point and package data.
 - Bare-path and explicit `run` CLI forms are equivalent.
 - All six stage commands run independently and respect `--output-file`/`--stdout`.
 - Pipeline output and artifact placement match the documented matrix.

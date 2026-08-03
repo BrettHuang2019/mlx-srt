@@ -27,8 +27,8 @@ def test_aligner_unwraps_result_objects(tmp_path, monkeypatch):
 
 def test_model_stages_validate_input(tmp_path):
     with pytest.raises(FileNotFoundError):
-        transcribe(tmp_path / "missing")
+        transcribe(tmp_path / "missing", "model")
     wav = tmp_path / "audio.wav"
     wav.touch()
     with pytest.raises(ValueError, match="must not be empty"):
-        align(wav, "  ")
+        align(wav, "  ", "aligner")

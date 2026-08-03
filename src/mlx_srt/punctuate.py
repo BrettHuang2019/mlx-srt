@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import re
 
-DEFAULT_MODEL_ID = "kredor/punctuate-all"
-DEFAULT_CHUNK_WORDS = 180
 TRAILING_PUNCT_RE = re.compile(r"[,.?:;\-…!]+$")
 DOUBLE_SPACE_RE = re.compile(r"\s+")
 WORD_CHARS = r"0-9A-Za-zÀ-ÖØ-öø-ÿŒœÆæ"
 WORD_RE = re.compile(rf"[{WORD_CHARS}]+(?:['’\-][{WORD_CHARS}]+)*")
 LABEL_TO_PUNCT = {"0": "", ".": ".", ",": ",", "?": "?", "-": "-", ":": ":"}
+# Verbs of speech mislabelled with a colon; the colon becomes a space instead.
+SPEECH_VERBS = (
+    "je dis", "je lui dis", "tu dis", "il dit", "elle dit", "on dit", "me dit",
+    "m'a dit", "me répond", "m'a répondu", "elle répond", "il répond",
+    "je réponds", "demande", "demandez", "ajoute", "ajouté",
+)
+SPEECH_COLON_RE = re.compile(rf"\b({'|'.join(SPEECH_VERBS)}):\s+([a-zà-ÿ])", re.I)
 
 
-def load_classifier(model_id: str = DEFAULT_MODEL_ID):
+def load_classifier(model_id: str):
     from transformers import pipeline
 
     return pipeline("token-classification", model=model_id, aggregation_strategy="first")
@@ -51,12 +56,7 @@ def normalize_output_text(text: str) -> str:
     text = re.sub(r"\?\.|\.\?", "?", text)
     text = re.sub(r":\.", ":", text)
     text = re.sub(r":\s+(pas|oui|non|ok|bah|bon)\.", r" \1.", text, flags=re.I)
-    text = re.sub(
-        r"\b(je dis|je lui dis|tu dis|il dit|elle dit|on dit|me dit|m'a dit|me répond|m'a répondu|elle répond|il répond|je réponds|demande|demandez|ajoute|ajouté):\s+([a-zà-ÿ])",
-        lambda match: f"{match.group(1)} {match.group(2)}",
-        text,
-        flags=re.I,
-    )
+    text = SPEECH_COLON_RE.sub(lambda match: f"{match.group(1)} {match.group(2)}", text)
     text = re.sub(r"\s+([,.?:;!])", r"\1", text)
     text = re.sub(r"([,.?:;!])([^\s])", r"\1 \2", text)
     text = re.sub(
@@ -77,7 +77,7 @@ def punctuate_chunk(classifier, words: list[str]) -> str:
         if label in LABEL_TO_PUNCT and index is not None:
             labels[index] = label
     return normalize_output_text(
-        " ".join(word + LABEL_TO_PUNCT[label] for word, label in zip(words, labels))
+        " ".join(word + LABEL_TO_PUNCT[label] for word, label in zip(words, labels, strict=True))
     )
 
 
@@ -91,8 +91,8 @@ def punctuate_text(
     text: str,
     classifier=None,
     *,
-    model_id: str = DEFAULT_MODEL_ID,
-    chunk_words: int = DEFAULT_CHUNK_WORDS,
+    model_id: str,
+    chunk_words: int,
 ) -> str:
     if chunk_words <= 0:
         raise ValueError("chunk_words must be positive")
@@ -122,7 +122,7 @@ def punctuate(
     text: str,
     classifier=None,
     *,
-    model_id: str = DEFAULT_MODEL_ID,
-    chunk_words: int = DEFAULT_CHUNK_WORDS,
+    model_id: str,
+    chunk_words: int,
 ) -> dict[str, str]:
     return {"text": punctuate_text(text, classifier, model_id=model_id, chunk_words=chunk_words)}
