@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-srt"
+version = "0.2.0"
+description = "Local French transcription and bilingual subtitle pipeline for Apple Silicon"
+requires-python = ">=3.10"
+dependencies = [
+  "click>=8.1",
+  "ffmpeg-python>=0.2",
+  "mlx-audio",
+  "mlx-lm>=0.1",
+  "psutil>=5.9",
+  "PyYAML>=6.0",
+  "torch",
+  "transformers>=4.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-mock>=3.10"]
+
+[project.scripts]
+mlx-srt = "mlx_srt.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mlx_srt = ["defaults.yaml", "prompts/*.txt"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration'"
+markers = ["integration: requires Apple Silicon and downloads real models"]
+testpaths = ["tests"]

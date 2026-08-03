@@ -1,13 +1,12 @@
-export PATH="/opt/homebrew/bin:$PATH"
-
 #!/bin/bash
 set -euo pipefail
+
+export PATH="/opt/homebrew/bin:$PATH"
 
 # ---- config ----
 OSASCRIPT="/usr/bin/osascript"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_PY="$SCRIPT_DIR/.venv/bin/python"
-MAIN_PY="$SCRIPT_DIR/src/main.py"
+MLX_SRT="$SCRIPT_DIR/bin/mlx-srt"
 DEBUG_LOG="$HOME/mlx-srt-debug.log"
 AUTO_LOG="$SCRIPT_DIR/mlx-srt-automator-debug.log"
 
@@ -25,11 +24,18 @@ cd "$SCRIPT_DIR" || exit 1
 # ---- process files ----
 for f in "$@"; do
   BASENAME="$(basename "$f")"
+  SRT_FILE="${f%.*}.srt"
+
+  if [ -f "$SRT_FILE" ]; then
+    echo "SKIPPED: SRT already exists: $SRT_FILE" >>"$DEBUG_LOG"
+    "$OSASCRIPT" -e "display notification \"Skipped (SRT exists): $BASENAME\" with title \"MLX-SRT\""
+    continue
+  fi
 
   "$OSASCRIPT" -e "display notification \"Starting: $BASENAME\" with title \"MLX-SRT\""
 
   TEMP_LOG="$(mktemp)"
-  if "$VENV_PY" -u "$MAIN_PY" "$f" >"$TEMP_LOG" 2>&1; then
+  if "$MLX_SRT" "$f" >"$TEMP_LOG" 2>&1; then
     "$OSASCRIPT" -e "display notification \"Completed: $BASENAME\" with title \"MLX-SRT\""
     rm -f "$TEMP_LOG"
   else

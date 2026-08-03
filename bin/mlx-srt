@@ -10,15 +10,13 @@ done
 
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
-MAIN_PY="$PROJECT_ROOT/src/main.py"
+CLI_BIN="$PROJECT_ROOT/.venv/bin/mlx-srt"
 
-if [ ! -x "$PYTHON_BIN" ]; then
-  echo "Error: Python environment not found at $PYTHON_BIN" >&2
+if [ ! -x "$CLI_BIN" ]; then
+  echo "Error: mlx-srt environment not found at $CLI_BIN" >&2
   echo "Create it first, for example:" >&2
-  echo "  cd $PROJECT_ROOT && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  echo "  cd $PROJECT_ROOT && python3 -m venv .venv && .venv/bin/pip install -e '.[test]'" >&2
   exit 1
 fi
 
-cd "$PROJECT_ROOT"
-exec "$PYTHON_BIN" "$MAIN_PY" "$@"
+exec "$CLI_BIN" "$@"

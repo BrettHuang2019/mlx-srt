@@ -1,0 +1,24 @@
+stt:
+  model_path: "mlx-community/whisper-large-v3-asr-4bit"
+punctuation:
+  enabled: true
+  model_path: "kredor/punctuate-all"
+  chunk_words: 180
+align:
+  model_path: "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+merge:
+  max_chars: 100
+  min_chars: 30
+  min_duration: 1.0
+translate:
+  model_path: "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+  batch_size: 10
+  max_tokens: 2048
+  temperature: 0
+  max_retries: 1
+  retry_delay: 1.0
+  prompt_file: "prompts/fr_zh.txt"
+system:
+  min_ram_gb: 2.5
+  task_check_interval: 60
+  max_wait_time_minutes: 30
